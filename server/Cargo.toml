@@ -1,0 +1,15 @@
+[package]
+name = "server"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+serde = { version = "1.0.173", features = ["derive"] }
+sled = "0.34.7"
+tokio = { version = "1.29.1", features = ["full"] }
+toml = "0.7.6"
+
+[dependencies.common]
+path = "../common"
