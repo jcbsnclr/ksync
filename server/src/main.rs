@@ -1,8 +1,14 @@
 mod files;
+mod server;
 
 use std::path::PathBuf;
+use std::io;
+use std::sync::Arc;
 
 use clap::Parser;
+use common::proto;
+use common::util;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncBufReadExt};
 
 #[derive(Parser)]
 struct Cmdline {
@@ -42,37 +48,12 @@ fn print_files(files: &files::Files) -> sled::Result<()> {
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
 
-    // let cmdline = Cmdline::parse();
-    let files = files::Files::open("/tmp/test-files")?;
-    files.clear()?;
+    let server = server::Server::init(server::ServerConfig {
+        addr: ([127, 0, 0, 1], 8080).into(),
+        db: PathBuf::from("/tmp/testdb")
+    }).await?;
 
-    print_files(&files)?;
-    println!();
-
-    let name = "test_file";
-    let object = files.insert(name, b"Hello, World!")?;
-    log::info!("inserted file '{name}' (object {})\n", object.hex());
-
-    let object = files.lookup(name)?.unwrap();
-    let data = files.get(&object)?;
-    let string = String::from_utf8_lossy(&data[..]);
-    log::info!("'{name}' stored at {}: \"{string}\"", object.hex());
-    println!();
-
-    print_files(&files)?;
-    println!();
-
-    let object = files.insert(name, b"Hello, World! but EDITED")?;
-    log::info!("updated file '{name}' (object {})\n", object.hex());
-
-    print_files(&files)?;
-    println!();
-
-    let object = files.lookup(name)?.unwrap();
-    let data = files.get(&object)?;
-    let string = String::from_utf8_lossy(&data[..]);
-    log::info!("'{name}' stored at {}: \"{string}\"", object.hex());
-    println!();
+    server.run().await?;
 
     Ok(())
 }

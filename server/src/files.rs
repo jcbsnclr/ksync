@@ -12,7 +12,9 @@ pub struct Files {
 
 impl Files {
     pub fn open(path: impl AsRef<Path>) -> sled::Result<Files> {
+        log::info!("opening db at {:?}", path.as_ref());
         let db = sled::open(path)?;
+        log::info!("opening objects and links trees");
         let objects = db.open_tree("objects")?;
         let links = db.open_tree("links")?;
 
@@ -22,6 +24,7 @@ impl Files {
     }
     
     pub fn clear(&self) -> sled::Result<()> {
+        log::info!("clearing database");
         self.objects.clear()?;
         self.links.clear()?;
 
@@ -29,6 +32,7 @@ impl Files {
     }
 
     pub fn insert(&self, name: &str, data: impl AsRef<[u8]>) -> sled::Result<Object> {
+        log::info!("inserting file {name}");
         let mut hasher = sha2::Sha256::new();
         hasher.update(data.as_ref());
         let hash = hasher.finalize();

@@ -1,4 +1,6 @@
 pub mod fmt;
+pub mod proto;
+pub mod util;
 
 pub struct Object([u8; 32]);
 
