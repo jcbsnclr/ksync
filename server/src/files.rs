@@ -56,29 +56,29 @@ impl Files {
         self.objects.get(&object.hash()).map(|obj| obj.unwrap())
     }
 
-    pub fn objects(&self) -> impl Iterator<Item = sled::Result<(Object, sled::IVec)>> {
-        self.objects.iter()
-            .map(|r| {
-                r.map(|(hash, data)| {
-                    let hash = (&hash[..]).try_into().expect("invalid hash");
-                    let object = Object::from_hash(hash);
+    // pub fn objects(&self) -> impl Iterator<Item = sled::Result<(Object, sled::IVec)>> {
+    //     self.objects.iter()
+    //         .map(|r| {
+    //             r.map(|(hash, data)| {
+    //                 let hash = (&hash[..]).try_into().expect("invalid hash");
+    //                 let object = Object::from_hash(hash);
 
-                    (object, data)
-                })
-            })
-    }
+    //                 (object, data)
+    //             })
+    //         })
+    // }
 
-    pub fn links(&self) -> impl Iterator<Item = sled::Result<(String, Object)>> {
-        self.links.iter()
-            .map(|r| {
-                r.map(|(name, hash)| {
-                    let hash = (&hash[..]).try_into().expect("invalid hash");
-                    let object = Object::from_hash(hash);
+    // pub fn links(&self) -> impl Iterator<Item = sled::Result<(String, Object)>> {
+    //     self.links.iter()
+    //         .map(|r| {
+    //             r.map(|(name, hash)| {
+    //                 let hash = (&hash[..]).try_into().expect("invalid hash");
+    //                 let object = Object::from_hash(hash);
 
-                    let name = String::from_utf8_lossy(&name[..]).into();
+    //                 let name = String::from_utf8_lossy(&name[..]).into();
 
-                    (name, object)
-                })
-            })
-    }
+    //                 (name, object)
+    //             })
+    //         })
+    // }
 }

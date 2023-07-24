@@ -2,13 +2,8 @@ mod files;
 mod server;
 
 use std::path::PathBuf;
-use std::io;
-use std::sync::Arc;
 
 use clap::Parser;
-use common::proto;
-use common::util;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncBufReadExt};
 
 #[derive(Parser)]
 struct Cmdline {
@@ -26,23 +21,23 @@ enum Command {
     GetLink { file: PathBuf }
 }
 
-fn print_files(files: &files::Files) -> sled::Result<()> {
-    println!("objects:");
-    for entry in files.objects() {
-        let (object, _) = entry?;
+// fn print_files(files: &files::Files) -> sled::Result<()> {
+//     println!("objects:");
+//     for entry in files.objects() {
+//         let (object, _) = entry?;
 
-        println!("  * {}", object.hex());
-    }
+//         println!("  * {}", object.hex());
+//     }
 
-    println!("links:");
-    for entry in files.links() {
-        let (name, object) = entry?;
+//     println!("links:");
+//     for entry in files.links() {
+//         let (name, object) = entry?;
 
-        println!("  * '{}' -> {}", name, object.hex());
-    }
+//         println!("  * '{}' -> {}", name, object.hex());
+//     }
 
-    Ok(())
-}
+//     Ok(())
+// }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

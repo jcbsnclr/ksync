@@ -6,16 +6,15 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path;
 use std::io;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::files::Files;
-use common::{proto, util};
+use common::proto;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("invalid bincode {0:?}")]
-    InvalidBincode(Vec<u8>),
+    // #[error("invalid bincode {0:?}")]
+    // InvalidBincode(Vec<u8>),
     #[error("invalid method {0:?}")]
     InvalidMethod([u8; 8])
 }

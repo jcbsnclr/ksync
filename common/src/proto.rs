@@ -1,7 +1,7 @@
 use std::io;
 
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
-use serde::Serialize;
+// use serde::Serialize;
 
 use crate::util;
 
