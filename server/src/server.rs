@@ -92,37 +92,41 @@ impl Server {
 
             tokio::spawn(async move {
                 let fut = async move {
-                    let request = proto::read_packet(&mut stream).await?;
-                    // dbg!(&request);
+                    loop {
+                        if let Some(request) = proto::read_packet(&mut stream).await? {
+                            let handler = methods.get(&request.method)
+                                .ok_or(Error::InvalidMethod(request.method))?;
 
-                    let handler = methods.get(&request.method)
-                        .ok_or(Error::InvalidMethod(request.method))?;
+                            let response = handler(&files, request.data);
 
-                    let response = handler(&files, request.data);
+                            match response {
+                                Ok(data) => {
+                                    let response = proto::Packet {
+                                        method: b"OK\0\0\0\0\0\0".to_owned(),
+                                        data
+                                    };
 
-                    match response {
-                        Ok(data) => {
-                            let response = proto::Packet {
-                                method: b"OK\0\0\0\0\0\0".to_owned(),
-                                data
-                            };
+                                    response.write(&mut stream).await?;
+                                },
 
-                            response.write(&mut stream).await?;
+                                Err(e) => {
+                                    let response = proto::Packet {
+                                        method: b"ERR\0\0\0\0\0".to_owned(),
+                                        data: e.to_string().as_bytes().to_owned()
+                                    };
 
-                            Ok::<_, anyhow::Error>(())
-                        },
+                                    response.write(&mut stream).await?;
 
-                        Err(e) => {
-                            let response = proto::Packet {
-                                method: b"ERR\0\0\0\0\0".to_owned(),
-                                data: e.to_string().as_bytes().to_owned()
-                            };
-
-                            response.write(&mut stream).await?;
-
-                            Err(e)
-                        }
+                                    return Err(e)
+                                }
+                            }
+                        } else {
+                            break
+                        }   
                     }
+
+                    log::info!("connection with {addr} closed");
+                    Ok(())
                 };
 
                 match fut.await {

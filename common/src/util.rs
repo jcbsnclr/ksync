@@ -5,7 +5,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 pub async fn read_array<const N: usize, R: AsyncReadExt + Unpin>(reader: &mut R) -> io::Result<[u8; N]> {
     let mut buf = [0; N];
 
-    reader.read(&mut buf).await?;
+    reader.read_exact(&mut buf).await?;
 
     Ok(buf)
 }

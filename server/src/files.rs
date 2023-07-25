@@ -33,6 +33,7 @@ impl Files {
 
     pub fn insert(&self, name: &str, data: impl AsRef<[u8]>) -> sled::Result<Object> {
         log::info!("inserting file {name}");
+        
         let mut hasher = sha2::Sha256::new();
         hasher.update(data.as_ref());
         let hash = hasher.finalize();

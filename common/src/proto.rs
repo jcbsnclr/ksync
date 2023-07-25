@@ -32,17 +32,25 @@ impl Packet {
     }
 }
 
-pub async fn read_packet<R: AsyncReadExt + Unpin>(reader: &mut R) -> io::Result<Packet> {
-    let proto = util::read_array(reader).await?;
+pub async fn read_packet<R: AsyncReadExt + Unpin>(reader: &mut R) -> io::Result<Option<Packet>> {
+    let proto = util::read_array(reader).await;
+    match proto {
+        Ok(proto) => {
+            if &proto != b"ksync\0\0\0" {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, Error::InvalidProtocol { proto: proto }))
+            }
 
-    if &proto != b"ksync\0\0\0" {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, Error::InvalidProtocol { proto: proto }))
+            let method = util::read_array(reader).await?;
+            let data = util::read_data(reader).await?;
+
+            Ok(Some(Packet {
+                method, data
+            }))
+        },
+
+        // eof
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
+
+        Err(e) => Err(e)
     }
-
-    let method = util::read_array(reader).await?;
-    let data = util::read_data(reader).await?;
-
-    Ok(Packet {
-        method, data
-    })
 }
