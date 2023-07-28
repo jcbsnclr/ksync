@@ -18,6 +18,7 @@ sled = "0.34.7"
 thiserror = "1.0.43"
 tokio = { version = "1.29.1", features = ["full"] }
 toml = "0.7.6"
+chrono = { version = "0.4.26", features = ["serde"] }
 
 [dependencies.common]
 path = "../common"

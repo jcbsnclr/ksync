@@ -1,39 +1,211 @@
-use std::path::Path;
+use std::{collections::HashMap, io};
+use std::path::Path as SysPath;
 
 use digest::Digest;
 
-use common::Object;
+use serde::{Serialize, Deserialize, de::DeserializeOwned};
+
+use common::{Object, Path};
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum Node {
+    Dir(HashMap<String, Node>),
+    File(Object)
+}
+
+impl Node {
+    fn new_dir() -> Node {
+        Node::Dir(HashMap::new())
+    }
+
+    fn new_file(object: Object) -> Node {
+        Node::File(object)
+    }
+
+    fn dir(&mut self) -> Option<&mut HashMap<String, Node>> {
+        if let Node::Dir(map) = self {
+            Some(map)
+        } else {
+            None
+        }
+    }
+
+    fn file(&mut self) -> Option<&mut Object> {
+        if let Node::File(object) = self {
+            Some(object)
+        } else {
+            None
+        }
+    }
+
+    fn has_child(&mut self, name: &str) -> io::Result<bool> {
+        if let Some(map) = self.dir() {
+            Ok(map.contains_key(&name.to_string()))
+        } else {
+            Err(io::ErrorKind::NotADirectory.into())
+        }
+    }
+
+    fn get_child(&mut self, name: &str) -> io::Result<&mut Node> {
+        if let Some(map) = self.dir() {
+            if let Some(child) = map.get_mut(&name.to_string()) {
+                Ok(child)
+            } else {
+                Err(io::ErrorKind::NotFound.into())
+            }
+        } else {
+            Err(io::ErrorKind::NotADirectory.into())
+        }
+    }
+
+    fn insert_child(&mut self, name: &str, node: Node) -> io::Result<()> {
+        if let Some(map) = self.dir() {
+            map.insert(name.to_string(), node);
+
+            Ok(())
+        } else {
+            Err(io::ErrorKind::NotADirectory.into())
+        }
+    }
+
+    fn traverse(&mut self, path: Path) -> io::Result<&mut Node> {
+        if path.as_str() != "/" {
+            let mut current = self;
+
+            for part in path.parts() {
+                current = current.get_child(&part)?;
+            }
+
+            Ok(current)
+        } else {
+            Ok(self)
+        }
+    }
+
+    fn children(&mut self) -> io::Result<impl Iterator<Item = (&String, &mut Node)>> {
+        if let Some(map) = self.dir() {
+            Ok(map.iter_mut())
+        } else {
+            Err(io::ErrorKind::NotADirectory.into())
+        }
+    }
+
+    // fn make_dir(&mut self, path: Path) -> io::Result<()> {
+    //     if let (path, Some(name)) = path.parent_child() {
+    //         let node = self.traverse(path)?;
+
+    //         if !node.has_child(name)? {
+    //             node.insert_child(name, Node::new_dir())?;
+    //         }
+    //     }
+
+    //     Ok(())
+    // }
+}
 
 pub struct Files {
     // _db: sled::Db,
     objects: sled::Tree,
-    links: sled::Tree
+    links: sled::Tree,
+    roots: sled::Tree
 }
 
 impl Files {
-    pub fn open(path: impl AsRef<Path>) -> sled::Result<Files> {
+    pub fn open(path: impl AsRef<SysPath>) -> anyhow::Result<Files> {
         log::info!("opening db at {:?}", path.as_ref());
         let db = sled::open(path)?;
         log::info!("opening objects and links trees");
         let objects = db.open_tree("objects")?;
         let links = db.open_tree("links")?;
+        let roots = db.open_tree("roots")?;
 
-        Ok(Files {
-            objects, links
-        })
+        let files = Files {
+            objects, links, roots
+        };
+
+        files.clear()?;
+
+        let dir = Node::Dir(HashMap::new());
+        let object = files.serialize(&dir)?;
+        files.roots.insert("root", object.hash())?;
+
+        Ok(files)
     }
-    
-    pub fn clear(&self) -> sled::Result<()> {
-        log::info!("clearing database");
-        self.objects.clear()?;
-        self.links.clear()?;
+
+    pub fn get_root(&self) -> anyhow::Result<Node> {
+        let hash = self.roots.get("root")?.unwrap();
+        let object = Object::from_hash((&hash[..]).try_into().unwrap());
+        self.deserialize(&object)
+    }
+
+    pub fn set_root(&self, node: Node) -> anyhow::Result<()> {
+        let object = self.serialize(&node)?;
+        self.roots.insert("root", object.hash())?;
+        Ok(())
+    }
+
+    // pub fn make_dir(&self, path: Path) -> anyhow::Result<()> {
+    //     let mut root = self.get_root()?;
+
+    //     let node = root.traverse(path)?;
+
+    //     node.insert_child(name, Node::new_dir())?;
+
+    //     let object = self.serialize(&root)?;
+    //     self.roots.insert("root", object.hash())?;
+
+    //     Ok(())
+    // }
+
+    pub fn make_dir(&self, path: Path) -> anyhow::Result<()> {
+        let mut root = self.get_root()?;
+
+        if let (path, Some(name)) = path.parent_child() {
+            let node = root.traverse(path)?;
+
+            if !node.has_child(name)? {
+                node.insert_child(name, Node::new_dir())?;
+            }
+        }
+
+        self.set_root(root)?;
 
         Ok(())
     }
 
-    pub fn insert(&self, name: &str, data: impl AsRef<[u8]>) -> sled::Result<Object> {
-        log::info!("inserting file {name}");
-        
+    pub fn make_dir_recursive(&self, path: Path) -> anyhow::Result<()> {
+        for ancestor in path.ancestors().skip(1) {
+            self.make_dir(ancestor)?;
+        }
+
+        self.make_dir(path)?;
+
+        Ok(())
+    }
+
+    pub fn ls(&self, path: Path) -> anyhow::Result<()> {
+        let mut root = self.get_root()?;
+
+        let node = root.traverse(path)?;
+
+        for (name, _) in node.children()? {
+            println!("  * entry: {name}");
+        }
+
+        Ok(())
+    }
+
+    pub fn clear(&self) -> sled::Result<()> {
+        log::info!("clearing database");
+        self.objects.clear()?;
+        self.links.clear()?;
+        self.roots.clear()?;
+
+        Ok(())
+    }
+
+    /// Create a new [Object] containing `data`, referenced by it's hash
+    pub fn create_object(&self, data: impl AsRef<[u8]>) -> sled::Result<Object> {
         let mut hasher = sha2::Sha256::new();
         hasher.update(data.as_ref());
         let hash = hasher.finalize();
@@ -41,20 +213,61 @@ impl Files {
         if self.objects.get(hash)?.is_none() {
             self.objects.insert(hash, data.as_ref())?;
         }
-        self.links.insert(name.as_bytes(), &hash[..])?;
 
         Ok(Object::from_hash(hash.try_into().unwrap()))
     }
 
-    pub fn lookup(&self, name: &str) -> sled::Result<Option<Object>> {
-        let hash = self.links.get(name.as_bytes())?
-            .map(|hash| Object::from_hash((&hash[..]).try_into().expect("invalid hash")));
-
-        Ok(hash)
+    /// Serialize `value`, and store it as an [Object]
+    pub fn serialize<T: Serialize>(&self, value: &T) -> anyhow::Result<Object> {
+        let data = bincode::serialize(value)?;
+        
+        Ok(self.create_object(&data)?)
     }
 
+    /// Load an [Object] from the database
     pub fn get(&self, object: &Object) -> sled::Result<sled::IVec> {
         self.objects.get(&object.hash()).map(|obj| obj.unwrap())
+    }
+
+    /// Load an [Object] and deserialize it 
+    pub fn deserialize<T: DeserializeOwned>(&self, object: &Object) -> anyhow::Result<T> {
+        let data = self.get(object)?.to_vec();
+        let value = bincode::deserialize(&data)?;
+        Ok(value)
+    }
+
+    pub fn lookup(&self, path: Path) -> anyhow::Result<Option<Object>> {
+        log::info!("looking up file {}", path);
+
+        let mut root = self.get_root()?;
+        let node = root.traverse(path)?;
+
+        if let Some(object) = node.file().cloned() {
+            log::info!("got object {}", object.hex());
+
+            Ok(Some(object))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn insert(&self, path: Path, data: impl AsRef<[u8]>) -> anyhow::Result<Object> {
+        log::info!("inserting file {path}");
+        
+        let object = self.create_object(data.as_ref())?;
+        let mut root = self.get_root()?;
+        
+        if let (path, Some(name)) = path.parent_child() {
+            self.make_dir_recursive(path)?;
+            let node = root.traverse(path)?;
+            node.insert_child(name, Node::new_file(object))?;
+
+            self.set_root(root)?;
+            Ok(object)
+        } else {
+            let err: io::Error = io::ErrorKind::InvalidFilename.into();
+            Err(err.into())
+        }
     }
 
     // pub fn objects(&self) -> impl Iterator<Item = sled::Result<(Object, sled::IVec)>> {

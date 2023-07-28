@@ -1,7 +1,13 @@
-use std::net::SocketAddr;
+#![feature(io_error_more)]
+
+mod config;
+
+use std::collections::HashMap;
 use std::path::PathBuf;
 
+use notify::Watcher;
 use tokio::net;
+use tokio::sync;
 
 use common::proto;
 
@@ -9,61 +15,53 @@ use clap::Parser;
 
 #[derive(Parser)]
 struct Cmdline {
-    addr: SocketAddr,
-    #[command(subcommand)]
-    cmd: Command
-}
-
-#[derive(Parser)]
-enum Command {
-    Insert {
-        path: PathBuf
-    },
-    Get {
-        path: PathBuf
-    }
+    #[arg(short, long)]
+    config: PathBuf
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // parse command line args and config file
     let args = Cmdline::parse();
+    let config_str = tokio::fs::read_to_string(args.config).await?;
+    let config: config::Config = toml::from_str(&config_str)?;
 
-    let mut stream = net::TcpStream::connect("127.0.0.1:8080").await?;
+    // connect to server
+    let mut stream = net::TcpStream::connect(config.client.remote).await?;
 
-    match args.cmd {
-        Command::Insert { path } => {
-            let data = tokio::fs::read(&path).await?;
-            let name = path.to_str().unwrap();
+    // open channel for file notifications
+    let (send, mut recv) = sync::mpsc::channel(1024);
 
-            let request = proto::Packet {
-                method: *b"INSERT\0\0",
-                data: bincode::serialize(&(name, data))?
-            };
+    // set up inotify watcher
+    let mut watcher = notify::recommended_watcher(move |e| send.blocking_send(e).unwrap() )?;
+    let mut remote_links = HashMap::new();
 
-            request.write(&mut stream).await?;
+    for config::Sync { to, from } in config.sync.iter() {
+        // insert file paths and their remote link into hashmap
+        remote_links.insert(from.canonicalize()?, to);
+        watcher.watch(from, notify::RecursiveMode::NonRecursive)?;
+    }
 
-            let response = proto::read_packet(&mut stream).await?.unwrap();
+    loop {
+        match recv.recv().await {
+            Some(event) => {
+                let event = event?;
+                dbg!(&event);
+                
+                for path in event.paths {
+                    let remote_link = remote_links.get(&path).unwrap();
+                    let data = tokio::fs::read(&path).await?;
 
-            dbg!(&response);
-            assert_eq!(response.method, b"OK\0\0\0\0\0\0".to_owned());
-        },
+                    proto::write_packet(&mut stream, "INSERT", (remote_link, data)).await?;
 
-        Command::Get { path } => {
-            let name = path.to_str().unwrap();
+                    let response = proto::read_packet(&mut stream).await?.expect("got no response");
 
-            let request = proto::Packet {
-                method: *b"GET\0\0\0\0\0",
-                data: bincode::serialize(name)?
-            };
+                    assert_eq!(response.method, "OK");
+                }
+            }
 
-            request.write(&mut stream).await?;
-
-            let response = proto::read_packet(&mut stream).await?.unwrap();
-            dbg!(&response);
-
-            assert_eq!(response.method, b"OK\0\0\0\0\0\0".to_owned());
-
-            tokio::fs::write(path, bincode::deserialize::<Vec<u8>>(&response.data)?).await?;
+            // closed; break
+            None => break
         }
     }
 

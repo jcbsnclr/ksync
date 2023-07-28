@@ -1,7 +1,7 @@
 use std::io;
 
+use serde::Serialize;
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
-// use serde::Serialize;
 
 use crate::util;
 
@@ -16,14 +16,14 @@ pub enum Error {
 
 #[derive(Debug)]
 pub struct Packet {
-    pub method: [u8; 8],
+    pub method: String,
     pub data: Vec<u8>
 }
 
 impl Packet {
-    pub async fn write<W: AsyncWriteExt + Unpin>(&self, writer: &mut W) -> io::Result<()> {
-        util::write_array(writer, b"ksync\0\0\0".to_owned()).await?;
-        util::write_array(writer, self.method).await?;
+    async fn write<W: AsyncWriteExt + Unpin>(&self, writer: &mut W) -> io::Result<()> {
+        util::write_array(writer, *b"ksync\0\0\0").await?;
+        util::write_data(writer, self.method.as_bytes()).await?;
         util::write_data(writer, &self.data).await?;
 
         writer.flush().await?;
@@ -40,7 +40,9 @@ pub async fn read_packet<R: AsyncReadExt + Unpin>(reader: &mut R) -> io::Result<
                 return Err(io::Error::new(io::ErrorKind::InvalidData, Error::InvalidProtocol { proto: proto }))
             }
 
-            let method = util::read_array(reader).await?;
+            let method = String::from_utf8(util::read_data(reader).await?)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
             let data = util::read_data(reader).await?;
 
             Ok(Some(Packet {
@@ -53,4 +55,13 @@ pub async fn read_packet<R: AsyncReadExt + Unpin>(reader: &mut R) -> io::Result<
 
         Err(e) => Err(e)
     }
+}
+
+pub async fn write_packet<W: AsyncWriteExt + Unpin, T: Serialize>(writer: &mut W, method: &str, data: T) -> anyhow::Result<()> {
+    Packet {
+        method: method.to_owned(),
+        data: bincode::serialize(&data)?
+    }.write(writer).await?;
+
+    Ok(())
 }
