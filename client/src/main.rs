@@ -56,7 +56,10 @@ async fn main() -> anyhow::Result<()> {
 
                     let response = proto::read_packet(&mut stream).await?.expect("got no response");
 
-                    assert_eq!(response.method, "OK");
+                    if response.method == "ERR" {
+                        let utf8: &str = bincode::deserialize(&response.data)?;
+                        println!("error: {utf8}");
+                    }
                 }
             }
 

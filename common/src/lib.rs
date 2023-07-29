@@ -44,7 +44,7 @@ impl<'a> TryFrom<&'a str> for Path<'a> {
 /// A [Path] in the server's virtual filesystem.
 /// 
 /// [Path]s must be a valid UTF-8 string, must be absolute (begin with a `/`), and cannot contain any double slashes (e.g. `/foo//bar`), or a trailing slash
-#[derive(Deserialize, Serialize, Debug, Clone, Copy)]
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, Hash)]
 #[serde(try_from = "&str")]
 pub struct Path<'a>(&'a str);
 
