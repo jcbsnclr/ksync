@@ -1,6 +1,6 @@
 use std::io;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncRead};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 
