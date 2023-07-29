@@ -1,5 +1,6 @@
 use std::fmt;
 
+/// Used for displaying a slice of bytes as a hexadecimal string
 pub struct HexSlice<'a>(&'a [u8]);
 
 impl<'a> From<&'a [u8]> for HexSlice<'a> {

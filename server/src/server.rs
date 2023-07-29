@@ -36,7 +36,7 @@ pub trait Method {
     type Input<'a>: Deserialize<'a>;
     type Output: Serialize;
 
-    /// The 8-byte identifier of the method. Used to dynamically dispatch a request to it's responder
+    /// UTF-8 string identifier of the method. Used to dynamically dispatch a request to it's responder
     const NAME: &'static str;
 
     /// A wrapper over [Method::call] that deserialises input, and serialises output, automatically
@@ -80,8 +80,10 @@ impl ServerBuilder {
 }
 
 impl Server {
+    // initialise the server with a given configuration
     pub async fn init(config: Config) -> anyhow::Result<Server> {
         ServerBuilder::new()
+            // install method handlers we need
             .add(Get)
             .add(Insert)
             .build(config).await
@@ -89,19 +91,27 @@ impl Server {
 
     pub async fn run(&self) -> anyhow::Result<()> {
         loop {
+            // accept connection from tcp listener
             let (mut stream, addr) = self.listener.accept().await?;
-            let (files, methods) = (self.files.clone(), self.methods.clone());
             log::info!("handling connection from {addr}");
 
+            // clone resources for connection handler
+            let files = self.files.clone();
+            let methods = self.methods.clone();
+
             tokio::spawn(async move {
+                // wrap operation in async block; lets us catch errors
                 let fut = async move {
-                    loop {
+                    loop { 
+                        // read next packet from client
                         if let Some(request) = proto::read_packet(&mut stream).await? {
+                            // dispatch request to respective method handler
                             let handler = methods.get(&request.method[..])
                                 .ok_or(Error::InvalidMethod(request.method))?;
 
                             let response = handler(&files, request.data);
 
+                            // send response to client
                             match response {
                                 Ok(data) => {
                                     proto::write_packet(&mut stream, "OK", data).await?;
@@ -121,6 +131,7 @@ impl Server {
                     Ok(())
                 };
 
+                // log errors
                 match fut.await {
                     Ok(()) => (),
                     Err(e) => {
@@ -132,6 +143,7 @@ impl Server {
     }
 }
 
+/// The [Get] method resolves a virtual filesystem [Path] to it's respective object, loads it, and sends it back to the client
 struct Get;
 
 impl Method for Get {
@@ -142,8 +154,16 @@ impl Method for Get {
 
     fn call<'a>(files: &Files, path: Self::Input<'a>) -> anyhow::Result<Self::Output> {
         log::info!("retrieving file {path}");
-        let object = files.lookup(path)?
-            .ok_or::<io::Error>(io::ErrorKind::NotFound.into())?;
+
+        let object = files.with_root("root", |node| {
+            if let Some(&mut object) = node.traverse(path)?.file() {
+                Ok(object)
+            } else {
+                let err: io::Error = io::ErrorKind::InvalidInput.into();
+                Err(err.into())
+            }
+        })?;
+
         log::info!("got object {}; returning", object.hex());
 
         let data = files.get(&object)?;
@@ -166,8 +186,13 @@ impl Method for Insert {
         
         let (parent, _) = path.parent_child();
 
-        files.make_dir_recursive(parent)?;
-        let object = files.insert(path, &data)?;
+        let object = files.create_object(&data)?;
+
+        files.with_root("root", |node| {
+            node.make_dir_recursive(parent)?;
+            node.insert(path, object)?;
+            Ok(())
+        })?;
         log::info!("stored {path} (object {})", object.hex());
 
         Ok(())

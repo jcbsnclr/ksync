@@ -14,15 +14,15 @@ pub enum Node {
 }
 
 impl Node {
-    fn new_dir() -> Node {
+    pub fn new_dir() -> Node {
         Node::Dir(HashMap::new())
     }
 
-    fn new_file(object: Object) -> Node {
+    pub fn new_file(object: Object) -> Node {
         Node::File(object)
     }
 
-    fn dir(&mut self) -> Option<&mut HashMap<String, Node>> {
+    pub fn dir(&mut self) -> Option<&mut HashMap<String, Node>> {
         if let Node::Dir(map) = self {
             Some(map)
         } else {
@@ -30,7 +30,7 @@ impl Node {
         }
     }
 
-    fn file(&mut self) -> Option<&mut Object> {
+    pub fn file(&mut self) -> Option<&mut Object> {
         if let Node::File(object) = self {
             Some(object)
         } else {
@@ -38,7 +38,7 @@ impl Node {
         }
     }
 
-    fn has_child(&mut self, name: &str) -> io::Result<bool> {
+    pub fn has_child(&mut self, name: &str) -> io::Result<bool> {
         if let Some(map) = self.dir() {
             Ok(map.contains_key(&name.to_string()))
         } else {
@@ -46,7 +46,7 @@ impl Node {
         }
     }
 
-    fn get_child(&mut self, name: &str) -> io::Result<&mut Node> {
+    pub fn get_child(&mut self, name: &str) -> io::Result<&mut Node> {
         if let Some(map) = self.dir() {
             if let Some(child) = map.get_mut(&name.to_string()) {
                 Ok(child)
@@ -58,7 +58,7 @@ impl Node {
         }
     }
 
-    fn insert_child(&mut self, name: &str, node: Node) -> io::Result<()> {
+    pub fn insert_child(&mut self, name: &str, node: Node) -> io::Result<()> {
         if let Some(map) = self.dir() {
             map.insert(name.to_string(), node);
 
@@ -68,7 +68,7 @@ impl Node {
         }
     }
 
-    fn traverse(&mut self, path: Path) -> io::Result<&mut Node> {
+    pub fn traverse(&mut self, path: Path) -> io::Result<&mut Node> {
         if path.as_str() != "/" {
             let mut current = self;
 
@@ -82,25 +82,48 @@ impl Node {
         }
     }
 
-    fn children(&mut self) -> io::Result<impl Iterator<Item = (&String, &mut Node)>> {
-        if let Some(map) = self.dir() {
-            Ok(map.iter_mut())
-        } else {
-            Err(io::ErrorKind::NotADirectory.into())
+    // pub fn children(&mut self) -> io::Result<impl Iterator<Item = (&String, &mut Node)>> {
+    //     if let Some(map) = self.dir() {
+    //         Ok(map.iter_mut())
+    //     } else {
+    //         Err(io::ErrorKind::NotADirectory.into())
+    //     }
+    // }
+
+    pub fn make_dir(&mut self, path: Path) -> io::Result<()> {
+        if let (path, Some(name)) = path.parent_child() {
+            let node = self.traverse(path)?;
+
+            if !node.has_child(name)? {
+                node.insert_child(name, Node::new_dir())?;
+            }
         }
+
+        Ok(())
     }
 
-    // fn make_dir(&mut self, path: Path) -> io::Result<()> {
-    //     if let (path, Some(name)) = path.parent_child() {
-    //         let node = self.traverse(path)?;
+    pub fn make_dir_recursive(&mut self, path: Path) -> io::Result<()> {
+        for ancestor in path.ancestors().skip(1) {
+            self.make_dir(ancestor)?;
+        }
 
-    //         if !node.has_child(name)? {
-    //             node.insert_child(name, Node::new_dir())?;
-    //         }
-    //     }
+        self.make_dir(path)?;
 
-    //     Ok(())
-    // }
+        Ok(())
+    }
+
+    pub fn insert(&mut self, path: Path, object: Object) -> io::Result<()> {
+        if let (path, Some(name)) = path.parent_child() {
+            // self.make_dir_recursive(path)?;
+            let node = self.traverse(path)?;
+            node.insert_child(name, Node::new_file(object))?;
+
+            Ok(())
+        } else {
+            let err: io::Error = io::ErrorKind::InvalidFilename.into();
+            Err(err.into())
+        }
+    }
 }
 
 pub struct Files {
@@ -132,67 +155,18 @@ impl Files {
         Ok(files)
     }
 
-    pub fn get_root(&self) -> anyhow::Result<Node> {
-        let hash = self.roots.get("root")?.unwrap();
+    pub fn with_root<T>(&self, root: &str, op: impl Fn(&mut Node) -> anyhow::Result<T>) -> anyhow::Result<T> {
+        let hash = self.roots.get(root)?
+            .ok_or(io::Error::new(io::ErrorKind::NotFound, "root not found"))?;
         let object = Object::from_hash((&hash[..]).try_into().unwrap());
-        self.deserialize(&object)
-    }
+        let mut node = self.deserialize(&object)?;
 
-    pub fn set_root(&self, node: Node) -> anyhow::Result<()> {
+        let result = op(&mut node)?;
+
         let object = self.serialize(&node)?;
-        self.roots.insert("root", object.hash())?;
-        Ok(())
-    }
+        self.roots.insert(root, object.hash())?;
 
-    // pub fn make_dir(&self, path: Path) -> anyhow::Result<()> {
-    //     let mut root = self.get_root()?;
-
-    //     let node = root.traverse(path)?;
-
-    //     node.insert_child(name, Node::new_dir())?;
-
-    //     let object = self.serialize(&root)?;
-    //     self.roots.insert("root", object.hash())?;
-
-    //     Ok(())
-    // }
-
-    pub fn make_dir(&self, path: Path) -> anyhow::Result<()> {
-        let mut root = self.get_root()?;
-
-        if let (path, Some(name)) = path.parent_child() {
-            let node = root.traverse(path)?;
-
-            if !node.has_child(name)? {
-                node.insert_child(name, Node::new_dir())?;
-            }
-        }
-
-        self.set_root(root)?;
-
-        Ok(())
-    }
-
-    pub fn make_dir_recursive(&self, path: Path) -> anyhow::Result<()> {
-        for ancestor in path.ancestors().skip(1) {
-            self.make_dir(ancestor)?;
-        }
-
-        self.make_dir(path)?;
-
-        Ok(())
-    }
-
-    pub fn ls(&self, path: Path) -> anyhow::Result<()> {
-        let mut root = self.get_root()?;
-
-        let node = root.traverse(path)?;
-
-        for (name, _) in node.children()? {
-            println!("  * entry: {name}");
-        }
-
-        Ok(())
+        Ok(result)
     }
 
     pub fn clear(&self) -> sled::Result<()> {
@@ -236,39 +210,39 @@ impl Files {
         Ok(value)
     }
 
-    pub fn lookup(&self, path: Path) -> anyhow::Result<Option<Object>> {
-        log::info!("looking up file {}", path);
+    // pub fn lookup(&self, path: Path) -> anyhow::Result<Option<Object>> {
+    //     log::info!("looking up file {}", path);
 
-        let mut root = self.get_root()?;
-        let node = root.traverse(path)?;
+    //     let mut root = self.get_root()?;
+    //     let node = root.traverse(path)?;
 
-        if let Some(object) = node.file().cloned() {
-            log::info!("got object {}", object.hex());
+    //     if let Some(object) = node.file().cloned() {
+    //         log::info!("got object {}", object.hex());
 
-            Ok(Some(object))
-        } else {
-            Ok(None)
-        }
-    }
+    //         Ok(Some(object))
+    //     } else {
+    //         Ok(None)
+    //     }
+    // }
 
-    pub fn insert(&self, path: Path, data: impl AsRef<[u8]>) -> anyhow::Result<Object> {
-        log::info!("inserting file {path}");
+    // pub fn insert(&self, path: Path, data: impl AsRef<[u8]>) -> anyhow::Result<Object> {
+    //     log::info!("inserting file {path}");
         
-        let object = self.create_object(data.as_ref())?;
-        let mut root = self.get_root()?;
+    //     let object = self.create_object(data.as_ref())?;
+    //     let mut root = self.get_root()?;
         
-        if let (path, Some(name)) = path.parent_child() {
-            self.make_dir_recursive(path)?;
-            let node = root.traverse(path)?;
-            node.insert_child(name, Node::new_file(object))?;
+    //     if let (path, Some(name)) = path.parent_child() {
+    //         // self.make_dir_recursive(path)?;
+    //         let node = root.traverse(path)?;
+    //         node.insert_child(name, Node::new_file(object))?;
 
-            self.set_root(root)?;
-            Ok(object)
-        } else {
-            let err: io::Error = io::ErrorKind::InvalidFilename.into();
-            Err(err.into())
-        }
-    }
+    //         self.set_root(root)?;
+    //         Ok(object)
+    //     } else {
+    //         let err: io::Error = io::ErrorKind::InvalidFilename.into();
+    //         Err(err.into())
+    //     }
+    // }
 
     // pub fn objects(&self) -> impl Iterator<Item = sled::Result<(Object, sled::IVec)>> {
     //     self.objects.iter()

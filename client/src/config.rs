@@ -1,10 +1,7 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::net::SocketAddr;
 
 use serde::Deserialize;
-
-use common::Path;
 
 #[derive(Deserialize)]
 pub struct Config {

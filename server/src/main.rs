@@ -7,9 +7,6 @@ mod config;
 use std::path::PathBuf;
 
 use clap::Parser;
-use files::Files;
-
-use common::Path;
 
 // fn print_files(files: &files::Files) -> sled::Result<()> {
 //     println!("objects:");
@@ -37,55 +34,24 @@ struct Cmdline {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::init();
-    let args = Cmdline::parse();
+    // env_logger::init();
+    // let args = Cmdline::parse();
 
+    // test configuration, hard-coded 
+    env_logger::Builder::new()
+        .filter_level(log::LevelFilter::Debug)
+        .init();
+    let args = Cmdline {
+        config: "example/server.toml".into()
+    };
+
+    // load and parse the config files
     let config_str = tokio::fs::read_to_string(args.config).await?;
     let config = toml::from_str(&config_str)?;
 
+    // initialise and run the server
     let server = server::Server::init(config).await?;
-
     server.run().await?;
-
-    // let files = Files::open("/tmp/test-db-aaaaa")?;
-
-    // let paths = &[
-    //     Path::new("/foo")?,
-    //     Path::new("/bar")?,
-    //     Path::new("/bar/baz")?
-    // ];
-
-    // let root = Path::new("/")?;
-
-    // for path in paths {
-    //     // files.make_dir(path)?;
-    //     println!("{path}");
-    // }
-
-    // let path = Path::new("/abc/def/ghi/jkl")?;
-    // let file = Path::new("/test.txt")?;
-
-    // files.make_dir_recursive(path)?;
-
-    // files.insert(file, "Hello, World!")?;
-
-    // if let Some(object) = files.lookup(file)? {
-    //     let data = files.get(&object)?.to_vec();
-    //     let string = std::str::from_utf8(&data)?;
-
-    //     println!("data: {string}\n");
-    // }
-
-    // for ancestor in path.ancestors() {
-    //     println!("{ancestor}:");
-    //     files.ls(ancestor)?;
-    // }
-
-    // let path = common::Path::new("/abc/def/ghi")?;
-
-    // for part in path.parts() {
-    //     println!("{part}");
-    // }
 
     Ok(())
 }
