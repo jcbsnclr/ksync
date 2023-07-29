@@ -3,6 +3,8 @@
 mod files;
 mod server;
 mod config;
+mod proto;
+mod util;
 
 use std::path::PathBuf;
 

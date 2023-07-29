@@ -1,15 +1,13 @@
 use tokio::net;
 
-use serde::{Serialize, Deserialize};
-
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 
 use crate::files::Files;
 use crate::config::Config;
-
-use common::{proto, Path};
+use crate::files::Path;
+use crate::proto::{self, Method, MethodFn};
 
 /// Represents the different protocol-specific errors that can be encountered while the server is running
 #[derive(Debug, thiserror::Error)]
@@ -26,30 +24,6 @@ pub struct Server {
     files: Arc<Files>,
     /// A map of a [Method]'s [Method::NAME] to it's [Method::call_bytes] implementation. Used to service requests
     methods: Arc<HashMap<&'static str, MethodFn>>
-}
-
-/// A type signature representing an implementation of [Method::call_bytes]
-type MethodFn = fn(&Files, bytes: Vec<u8>) -> anyhow::Result<Vec<u8>>;
-
-/// The [Method] trait is used to implement different methods of the protocol (e.g. `GET`, `INSERT`, etc.)
-pub trait Method {
-    type Input<'a>: Deserialize<'a>;
-    type Output: Serialize;
-
-    /// UTF-8 string identifier of the method. Used to dynamically dispatch a request to it's responder
-    const NAME: &'static str;
-
-    /// A wrapper over [Method::call] that deserialises input, and serialises output, automatically
-    fn call_bytes(files: &Files, bytes: Vec<u8>) -> anyhow::Result<Vec<u8>> {
-        let input = bincode::deserialize(&bytes)?;
-        let output = Self::call(files, input)?;
-        let output_bytes = bincode::serialize(&output)?;
-
-        Ok(output_bytes)
-    }
-
-    /// The functionality to be invoked when a method is called
-    fn call<'a>(files: &Files, input: Self::Input<'a>) -> anyhow::Result<Self::Output>;
 }
 
 /// Used to construct a [Server].
