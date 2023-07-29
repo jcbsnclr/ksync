@@ -74,7 +74,7 @@ pub struct Packet {
 
 impl Packet {
     /// Writes an individual [Packet] to a given `writer` and flushes the stream
-    async fn write<W: AsyncWriteExt + Unpin>(&self, writer: &mut W) -> io::Result<()> {
+    pub async fn write<W: AsyncWriteExt + Unpin>(&self, writer: &mut W) -> io::Result<()> {
         write_array(writer, *b"ksync\0\0\0").await?;
         write_data(writer, self.method.as_bytes()).await?;
         write_data(writer, &self.data).await?;
@@ -150,15 +150,19 @@ pub trait Method {
     fn call<'a>(files: &Files, input: Self::Input<'a>) -> anyhow::Result<Self::Output>;
 }
 
-pub async fn invoke<'a, M: Method, S: AsyncReadExt + AsyncWriteExt + Unpin>(stream: &mut S, method: M, input: M::Input<'a>) -> anyhow::Result<M::Output> {
+/// Invokes a given [Method] on a server
+pub async fn invoke<'a, M: Method, S: AsyncReadExt + AsyncWriteExt + Unpin>(stream: &mut S, _method: M, input: M::Input<'a>) -> anyhow::Result<M::Output> {
+    // send method call to server
     write_packet(stream, M::NAME, input).await?;
 
+    // read response from server
     let response = read_packet(stream).await?
         .ok_or({
             let err: io::Error = io::ErrorKind::UnexpectedEof.into();
             err
         })?;
 
+    // check for error
     if response.method == "OK" {
         let result = bincode::deserialize(&response.data)?;
         Ok(result)

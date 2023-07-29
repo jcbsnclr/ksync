@@ -88,7 +88,11 @@ impl Server {
                             // send response to client
                             match response {
                                 Ok(data) => {
-                                    proto::write_packet(&mut stream, "OK", data).await?;
+                                    // proto::write_packet(&mut stream, "OK", data).await?;
+                                    proto::Packet {
+                                        method: "OK".to_string(),
+                                        data
+                                    }.write(&mut stream).await?;
                                 },
 
                                 Err(e) => {
@@ -118,7 +122,7 @@ impl Server {
 }
 
 /// The [Get] method resolves a virtual filesystem [Path] to it's respective object, loads it, and sends it back to the client
-struct Get;
+pub struct Get;
 
 impl Method for Get {
     type Input<'a> = Path<'a>;
@@ -146,7 +150,7 @@ impl Method for Get {
     }
 }
 
-struct Insert;
+pub struct Insert;
 
 impl Method for Insert {
     type Input<'a> = (Path<'a>, Vec<u8>);
