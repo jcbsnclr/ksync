@@ -46,7 +46,7 @@ impl<'a> TryFrom<&'a str> for Path<'a> {
 /// A [Path] in the server's virtual filesystem.
 /// 
 /// [Path]s must be a valid UTF-8 string, must be absolute (begin with a `/`), and cannot contain any double slashes (e.g. `/foo//bar`), or a trailing slash
-#[derive(Deserialize, Serialize, Debug, Clone, Copy, Hash)]
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, Hash, PartialEq, Eq)]
 #[serde(try_from = "&str")]
 pub struct Path<'a>(&'a str);
 
@@ -281,13 +281,13 @@ impl Node {
         }
     }
 
-    // pub fn children(&mut self) -> io::Result<impl Iterator<Item = (&String, &mut Node)>> {
-    //     if let Some(map) = self.dir() {
-    //         Ok(map.iter_mut())
-    //     } else {
-    //         Err(io::ErrorKind::NotADirectory.into())
-    //     }
-    // }
+    pub fn children(&mut self) -> io::Result<impl Iterator<Item = (&String, &mut Node)>> {
+        if let Some(map) = self.dir() {
+            Ok(map.iter_mut())
+        } else {
+            Err(io::ErrorKind::NotADirectory.into())
+        }
+    }
 
     /// Make a directory at a given path relative to `self`. Will error if `self` is not a [Node::Dir], or if the parent of a given folder does not exist.
     pub fn make_dir(&mut self, path: Path) -> io::Result<()> {
@@ -324,6 +324,52 @@ impl Node {
         } else {
             let err: io::Error = io::ErrorKind::InvalidFilename.into();
             Err(err.into())
+        }
+    }
+
+    pub fn file_list<'a>(&'a mut self) -> io::Result<FileList<'a>> {
+        if self.dir().is_some() {
+            Ok(FileList {
+                node_stack: vec![("/".to_string(), self)],
+                output_stack: vec![]
+            })
+        } else {
+            Err(io::ErrorKind::NotADirectory.into())
+        }
+    }
+}
+
+pub struct FileList<'a> {
+    node_stack: Vec<(String, &'a mut Node)>,
+    output_stack: Vec<(String, Object)>,
+}
+
+impl<'a> Iterator for FileList<'a> {
+    type Item = (String, Object);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.output_stack.is_empty() {
+            // return value from output queue
+            self.output_stack.pop()
+        } else {
+            if let Some((path, node)) = self.node_stack.pop() {
+                // iterate over children of next item in node stack
+                for (name, node) in node.children().unwrap() {
+                    match node {
+                        // if it is a dir, push to the node stack to be processed later
+                        Node::Dir(_) => self.node_stack.push((format!("{}{}/", path, name), node)),
+
+                        // if it is a file, push it to the output stack 
+                        Node::File(object) => self.output_stack.push((format!("{}{}", path, name), object.clone()))
+                    }
+                }
+
+                // call next again once the current dir has been processed
+                self.next()
+            } else {
+                // no more files to process
+                None
+            }
         }
     }
 }

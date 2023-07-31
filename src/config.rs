@@ -7,7 +7,8 @@ use serde::Deserialize;
 #[derive(Deserialize, Debug)]
 pub struct Config {
     /// Server configuration
-    pub server: Server
+    pub server: Option<Server>,
+    pub sync: Option<Sync>
 }
 
 /// Server configuration
@@ -17,4 +18,15 @@ pub struct Server {
     pub addr: SocketAddr,
     /// Location of files database
     pub db: PathBuf
+}
+
+#[derive(Deserialize, Debug)]
+pub struct Sync {
+    pub remote: SocketAddr,
+    pub point: SyncPoint
+}
+
+#[derive(Deserialize, Debug)]
+pub struct SyncPoint {
+    pub dir: PathBuf
 }

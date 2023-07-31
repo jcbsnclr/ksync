@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 
-use crate::files::Files;
-use crate::config::Config;
+use crate::files::{Files, Object};
+use crate::config;
 use crate::files::Path;
 use crate::proto::{self, Method, MethodFn};
 
@@ -23,7 +23,7 @@ pub struct Server {
     listener: net::TcpListener,
     files: Arc<Files>,
     /// A map of a [Method]'s [Method::NAME] to it's [Method::call_bytes] implementation. Used to service requests
-    methods: Arc<HashMap<&'static str, MethodFn>>
+    methods: Arc<HashMap<&'static str, MethodFn>>,
 }
 
 /// Used to construct a [Server].
@@ -43,11 +43,11 @@ impl ServerBuilder {
     }
 
     /// Construct the [Server] object
-    pub async fn build(self, config: Config) -> anyhow::Result<Server> {
+    pub async fn build(self, config: config::Server) -> anyhow::Result<Server> {
         log::info!("initialising server with config: {config:#?}");
-        let listener = net::TcpListener::bind(config.server.addr).await?;
-        log::info!("listener bound to {}", config.server.addr);
-        let files = Files::open(config.server.db)?;
+        let listener = net::TcpListener::bind(config.addr).await?;
+        log::info!("listener bound to {}", config.addr);
+        let files = Files::open(config.db)?;
 
         Ok(Server { listener, files: Arc::new(files), methods: Arc::new(self.methods) })
     }
@@ -55,11 +55,12 @@ impl ServerBuilder {
 
 impl Server {
     // initialise the server with a given configuration
-    pub async fn init(config: Config) -> anyhow::Result<Server> {
+    pub async fn init(config: config::Server) -> anyhow::Result<Server> {
         ServerBuilder::new()
             // install method handlers we need
             .add(Get)
             .add(Insert)
+            .add(GetTree)
             .build(config).await
     }
 
@@ -174,5 +175,25 @@ impl Method for Insert {
         log::info!("stored {path} (object {})", object.hex());
 
         Ok(())
+    }
+}
+
+pub struct GetTree;
+
+impl Method for GetTree {
+    type Input<'a> = ();
+    type Output = Vec<(String, Object)>;
+    // type Output = ();
+
+    const NAME: &'static str = "GET_TREE";
+
+    fn call<'a>(files: &Files, _: Self::Input<'a>) -> anyhow::Result<Self::Output> {
+        log::info!("retrieving file listing");
+
+        let output = files.with_root("root", |node| {
+            Ok(node.file_list()?.collect())
+        })?;
+
+        Ok(output)
     }
 }

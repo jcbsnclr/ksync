@@ -1,6 +1,5 @@
-[client]
+[sync]
 remote = "127.0.0.1:8080"
 
-[[sync]]
-from = "example/test.txt"
-to = "/files/test.txt"
+[sync.point]
+dir = "/tmp/sync-point"

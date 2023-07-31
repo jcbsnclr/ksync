@@ -5,6 +5,7 @@ mod server;
 mod config;
 mod proto;
 mod util;
+mod sync;
 
 use std::{path::PathBuf, net::SocketAddr};
 
@@ -56,7 +57,9 @@ enum Method {
         to: String,
         #[arg(short, long)]
         from: PathBuf
-    }
+    },
+
+    GetTree
 }
 
 #[derive(Parser)]
@@ -82,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
     //     .filter_level(log::LevelFilter::Debug)
     //     .init();
     // let args = Cmdline {
-    //     command: Command::Daemon { config: "example/server.toml".into() }
+    //     command: Command::Daemon { config: "example/client.toml".into() }
     // };
 
 
@@ -91,11 +94,35 @@ async fn main() -> anyhow::Result<()> {
     match args.command {
         Command::Daemon { config } => {
             let config_str = tokio::fs::read_to_string(config).await?;
-            let config = toml::from_str(&config_str)?;
-        
-            // initialise and run the server
-            let server = server::Server::init(config).await?;
-            server.run().await?;
+            let config: config::Config = toml::from_str(&config_str)?;
+
+            if config.server.is_none() && config.sync.is_none() {
+                eprintln!("error: no server or sync configuration; nothing to do");
+            }
+
+            let server_handle = tokio::spawn(async {
+                // if server config provided, initialise and run the server
+                if let Some(server_config) = config.server {
+                    let server = server::Server::init(server_config).await?;
+                    server.run().await?;
+                }
+
+                Ok::<_, anyhow::Error>(())
+            });
+
+            let sync_handle = tokio::spawn(async {
+                // if sync config provided, initialise and run the sync client
+                if let Some(sync_config) = config.sync {
+                    let mut sync = sync::SyncClient::init(sync_config).await?;
+                    sync.run().await?;
+                }
+
+                Ok::<_, anyhow::Error>(())
+            });
+
+            // wait on tasks to finish before shutting down
+            server_handle.await??;
+            sync_handle.await??;
         },
 
         Command::Cli { addr, method } => cli(addr, method).await?
@@ -120,6 +147,14 @@ async fn cli(addr: SocketAddr, method: Method) -> anyhow::Result<()> {
             let data = tokio::fs::read(from).await?;
 
             proto::invoke(&mut stream, server::Insert, (path, data)).await?;
+        },
+
+        Method::GetTree => {
+            let list = proto::invoke(&mut stream, server::GetTree, ()).await?;
+
+            for (path, object) in list {
+                println!("{}: {}", path, object.hex());
+            }
         }
     }
 
