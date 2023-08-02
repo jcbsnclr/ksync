@@ -9,6 +9,7 @@ mod sync;
 
 use std::{path::PathBuf, net::SocketAddr};
 
+use chrono::TimeZone;
 use clap::Parser;
 use tokio::net::TcpStream;
 
@@ -59,7 +60,8 @@ enum Method {
         from: PathBuf
     },
 
-    GetTree
+    GetTree,
+    Clear
 }
 
 #[derive(Parser)]
@@ -71,34 +73,22 @@ struct Cmdline {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
+    // parse command line arguments
     let args = Cmdline::parse();
-
-    // test configuration, hard-coded 
-    // env_logger::Builder::new()
-    //     .filter_level(log::LevelFilter::Debug)
-    //     .init();
-    // let args = Cmdline {
-    //     command: Command::Cli { addr: "127.0.0.1:8080".parse().unwrap(), method: Method::Get { to: "outp.txt".into(), from: "/files/test.txt".to_owned() } }
-    // };
-
-    // env_logger::Builder::new()
-    //     .filter_level(log::LevelFilter::Debug)
-    //     .init();
-    // let args = Cmdline {
-    //     command: Command::Daemon { config: "example/client.toml".into() }
-    // };
-
-
-    // load and parse the config files
 
     match args.command {
         Command::Daemon { config } => {
+            // ksync running in daemon mode
+
+            // parse config file
             let config_str = tokio::fs::read_to_string(config).await?;
             let config: config::Config = toml::from_str(&config_str)?;
 
             if config.server.is_none() && config.sync.is_none() {
                 eprintln!("error: no server or sync configuration; nothing to do");
             }
+
+            // spawn file server and sync client if respective configurations supplied
 
             let server_handle = tokio::spawn(async {
                 // if server config provided, initialise and run the server
@@ -125,6 +115,7 @@ async fn main() -> anyhow::Result<()> {
             sync_handle.await??;
         },
 
+        // user has invoked the command line interface
         Command::Cli { addr, method } => cli(addr, method).await?
     }
 
@@ -132,6 +123,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn cli(addr: SocketAddr, method: Method) -> anyhow::Result<()> {
+    // connect to remote server
     let mut stream = TcpStream::connect(addr).await?;
 
     match method {
@@ -150,11 +142,17 @@ async fn cli(addr: SocketAddr, method: Method) -> anyhow::Result<()> {
         },
 
         Method::GetTree => {
-            let list = proto::invoke(&mut stream, server::GetTree, ()).await?;
+            let list = proto::invoke(&mut stream, server::GetListing, ()).await?;
 
-            for (path, object) in list {
-                println!("{}: {}", path, object.hex());
+            for (path, object, timestamp) in list.iter() {
+                let timestamp = chrono::Local.timestamp_nanos(*timestamp as i64);
+
+                println!("{}: {} @ {}", path, object.hex(), timestamp);
             }
+        },
+
+        Method::Clear => {
+            proto::invoke(&mut stream, server::Clear, ()).await?;
         }
     }
 

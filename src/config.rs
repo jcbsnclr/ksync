@@ -23,7 +23,8 @@ pub struct Server {
 #[derive(Deserialize, Debug)]
 pub struct Sync {
     pub remote: SocketAddr,
-    pub point: SyncPoint
+    pub point: SyncPoint,
+    pub resync_time: u64
 }
 
 #[derive(Deserialize, Debug)]

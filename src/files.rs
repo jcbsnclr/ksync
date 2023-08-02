@@ -1,3 +1,5 @@
+use std::ops::DerefMut;
+use std::time::SystemTime;
 use std::{collections::HashMap, io};
 use std::path::Path as SysPath;
 use std::fmt::Debug;
@@ -199,25 +201,52 @@ impl<'a> std::fmt::Display for Path<'a> {
 
 /// A [Node] represents a filesystem tree
 #[derive(Serialize, Deserialize, Debug)]
-pub enum Node {
+pub enum NodeData {
     Dir(HashMap<String, Node>),
     File(Object)
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Node {
+    data: NodeData,
+    timestamp: u128
+}
+
+impl std::ops::Deref for Node {
+    type Target = NodeData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+
+impl DerefMut for Node {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.data
+    }
+}
+
 impl Node {
+    pub fn new(data: NodeData) -> Node {
+        Node {
+            data,
+            timestamp: SystemTime::UNIX_EPOCH.elapsed().unwrap().as_nanos()
+        }
+    }
+
     /// Create a new empty [Node::Dir]
     pub fn new_dir() -> Node {
-        Node::Dir(HashMap::new())
+        Node::new(NodeData::Dir(HashMap::new()))
     }
 
     /// Create a new [Node::File] referencing a given [Object] 
     pub fn new_file(object: Object) -> Node {
-        Node::File(object)
+        Node::new(NodeData::File(object))
     }
 
     /// Returns `Some(map)` if `self` is [Node::Dir]
     pub fn dir(&mut self) -> Option<&mut HashMap<String, Node>> {
-        if let Node::Dir(map) = self {
+        if let NodeData::Dir(map) = &mut self.data {
             Some(map)
         } else {
             None
@@ -226,11 +255,15 @@ impl Node {
 
     /// Returns `Some(object)` if `self` is [Node::Dir]
     pub fn file(&mut self) -> Option<&mut Object> {
-        if let Node::File(object) = self {
+        if let NodeData::File(object) = &mut self.data {
             Some(object)
         } else {
             None
         }
+    }
+
+    pub fn timestamp(&mut self) -> u128 {
+        self.timestamp
     }
 
     /// Checks to see if a node contains a given child `name`
@@ -341,11 +374,11 @@ impl Node {
 
 pub struct FileList<'a> {
     node_stack: Vec<(String, &'a mut Node)>,
-    output_stack: Vec<(String, Object)>,
+    output_stack: Vec<(String, Object, u128)>,
 }
 
 impl<'a> Iterator for FileList<'a> {
-    type Item = (String, Object);
+    type Item = (String, Object, u128);
 
     fn next(&mut self) -> Option<Self::Item> {
         if !self.output_stack.is_empty() {
@@ -355,12 +388,12 @@ impl<'a> Iterator for FileList<'a> {
             if let Some((path, node)) = self.node_stack.pop() {
                 // iterate over children of next item in node stack
                 for (name, node) in node.children().unwrap() {
-                    match node {
+                    match node.data {
                         // if it is a dir, push to the node stack to be processed later
-                        Node::Dir(_) => self.node_stack.push((format!("{}{}/", path, name), node)),
+                        NodeData::Dir(_) => self.node_stack.push((format!("{}{}/", path, name), node)),
 
                         // if it is a file, push it to the output stack 
-                        Node::File(object) => self.output_stack.push((format!("{}{}", path, name), object.clone()))
+                        NodeData::File(object) => self.output_stack.push((format!("{}{}", path, name), object.clone(), node.timestamp()))
                     }
                 }
 
@@ -388,7 +421,7 @@ impl Files {
     pub fn open(path: impl AsRef<SysPath>) -> anyhow::Result<Files> {
         log::info!("opening db at {:?}", path.as_ref());
         let db = sled::open(path)?;
-        log::info!("opening objects and links trees");
+        log::info!("opening objects and roots trees");
         let objects = db.open_tree("objects")?;
         let roots = db.open_tree("roots")?;
 
@@ -396,11 +429,12 @@ impl Files {
             objects, roots
         };
 
-        files.clear()?;
-
-        let dir = Node::Dir(HashMap::new());
-        let object = files.serialize(&dir)?;
-        files.roots.insert("root", object.hash())?;
+        // if root node does not exist, create it 
+        if files.roots.get("root")?.is_none() {
+            let dir = Node::new_dir();
+            let object = files.serialize(&dir)?;
+            files.roots.insert("root", object.hash())?;
+        }
 
         Ok(files)
     }
@@ -424,10 +458,15 @@ impl Files {
     }
 
     /// Clears the files database
-    pub fn clear(&self) -> sled::Result<()> {
+    pub fn clear(&self) -> anyhow::Result<()> {
         log::info!("clearing database");
         self.objects.clear()?;
         self.roots.clear()?;
+
+        // create a new root node
+        let dir = Node::new_dir();
+        let object = self.serialize(&dir)?;
+        self.roots.insert("root", object.hash())?;
 
         Ok(())
     }

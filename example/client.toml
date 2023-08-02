@@ -1,5 +1,6 @@
 [sync]
 remote = "127.0.0.1:8080"
+resync_time = 4
 
 [sync.point]
 dir = "/tmp/sync-point"

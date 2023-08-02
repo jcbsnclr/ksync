@@ -1,8 +1,11 @@
 use tokio::net;
 
+use serde::{Serialize, Deserialize};
+
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
+use std::time::{SystemTime, Duration};
 
 use crate::files::{Files, Object};
 use crate::config;
@@ -60,7 +63,7 @@ impl Server {
             // install method handlers we need
             .add(Get)
             .add(Insert)
-            .add(GetTree)
+            .add(GetListing)
             .build(config).await
     }
 
@@ -151,6 +154,7 @@ impl Method for Get {
     }
 }
 
+/// The [Insert] methods creates an object for a given piece of data, and inserts it into the filesystem at a given path
 pub struct Insert;
 
 impl Method for Insert {
@@ -178,11 +182,30 @@ impl Method for Insert {
     }
 }
 
-pub struct GetTree;
+/// A list of files stored on the server, with their path, object, and timestamp
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FileListing(Vec<(String, Object, u128)>);
 
-impl Method for GetTree {
+impl FileListing {
+    pub fn iter(&self) -> impl Iterator<Item = &(String, Object, u128)> {
+        self.0.iter()
+    }
+
+    pub fn as_map<'a>(&'a self) -> HashMap<Path<'a>, (Object, SystemTime)> {
+        let files = self
+            .iter()
+            .map(|(p,o,t)| (Path::new(p).unwrap(), (o.clone(), SystemTime::UNIX_EPOCH + Duration::from_nanos(*t as u64))));
+
+        HashMap::from_iter(files)
+    }
+}
+
+/// Retrieves a [FileListing] from the server
+pub struct GetListing;
+
+impl Method for GetListing {
     type Input<'a> = ();
-    type Output = Vec<(String, Object)>;
+    type Output = FileListing;
     // type Output = ();
 
     const NAME: &'static str = "GET_TREE";
@@ -191,9 +214,26 @@ impl Method for GetTree {
         log::info!("retrieving file listing");
 
         let output = files.with_root("root", |node| {
-            Ok(node.file_list()?.collect())
+            Ok(FileListing(node.file_list()?.collect()))
         })?;
 
         Ok(output)
+    }
+}
+
+/// Clear the files database
+pub struct Clear;
+
+impl Method for Clear {
+    type Input<'a> = ();
+    type Output = ();
+
+    const NAME: &'static str = "CLEAR";
+
+    fn call<'a>(files: &Files, _: Self::Input<'a>) -> anyhow::Result<Self::Output> {
+        log::info!("clearing database");
+        files.clear()?;
+
+        Ok(())
     }
 }
