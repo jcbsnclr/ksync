@@ -18,6 +18,20 @@ While this is perfectly fine (and honestly would have worked for my purposes), t
 
 The second problem is already solved by `ksync`. While compression is not yet enabled, `sled` does support it, so it should simply be a case of enabling it in the codebase (will be done when the need arises). File de-duplication is already solved, as "objects" (pieces of data stored on the server), are indexed via a hash of their contents. This means that 2 files that have the same contents will occupy the same object.
 
+# Building & Running
+In order to build `ksync`, you will need to have Rust installed, with the nightly toolchain. You can get rust from [rustup](https://rustup.rs/).
+
+## Building
+```sh
+cargo build
+```
+
+## Running
+```sh
+# RUST_LOG=info gives us more useful output. only useful for daemon mode
+RUST_LOG=info cargo run -- <ARGS>
+```
+
 # Usage
 The basic usage of `ksync` is as follows:
 ```sh

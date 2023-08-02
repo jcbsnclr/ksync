@@ -64,6 +64,7 @@ impl Server {
             .add(Get)
             .add(Insert)
             .add(GetListing)
+            .add(Clear)
             .build(config).await
     }
 
