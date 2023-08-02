@@ -11,6 +11,7 @@
 * support removing files/folders
 * encrypted communication to/from server
 * basic authentication via public key cryptography
+* garbage collection (removing objects that are no longer referenced)
 * automatically/manually produce `.tar.gz` backups of the server
 
 ## Long-term plans
