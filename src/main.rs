@@ -60,7 +60,7 @@ enum Method {
         from: PathBuf
     },
 
-    GetTree,
+    GetListing,
     Clear
 }
 
@@ -141,7 +141,7 @@ async fn cli(addr: SocketAddr, method: Method) -> anyhow::Result<()> {
             proto::invoke(&mut stream, server::Insert, (path, data)).await?;
         },
 
-        Method::GetTree => {
+        Method::GetListing => {
             let list = proto::invoke(&mut stream, server::GetListing, ()).await?;
 
             for (path, object, timestamp) in list.iter() {
