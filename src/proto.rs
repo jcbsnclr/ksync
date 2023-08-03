@@ -49,7 +49,7 @@ pub async fn write_int<W: AsyncWriteExt + Unpin>(writer: &mut W, val: u64) -> io
 /// Writes a `length, bytes...` encoded list of bytes to a given `writer`
 pub async fn write_data<W: AsyncWriteExt + Unpin>(writer: &mut W, data: &[u8]) -> io::Result<()> {
     write_int(writer, data.len() as u64).await?;
-    writer.write(&data).await?;
+    writer.write_all(&data).await?;
 
     Ok(())
 }
