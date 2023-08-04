@@ -76,6 +76,13 @@ async fn main() -> anyhow::Result<()> {
     // parse command line arguments
     let args = Cmdline::parse();
 
+    // env_logger::builder()
+    //     .filter_level(log::LevelFilter::Debug)
+    //     .init();
+    // let args = Cmdline {
+    //     command: Command::Daemon { config: "example/server.toml".into() }
+    // };
+
     match args.command {
         Command::Daemon { config } => {
             // ksync running in daemon mode

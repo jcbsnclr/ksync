@@ -407,6 +407,20 @@ impl<'a> Iterator for FileList<'a> {
     }
 }
 
+fn append_merge(_key: &[u8], old_value: Option<&[u8]>, merged_bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut list: Vec<Object> = if let Some(bytes) = old_value {
+        bincode::deserialize(bytes).unwrap()
+    } else {
+        vec![]
+    };
+
+    let object = Object::from_hash(merged_bytes.try_into().unwrap());
+
+    list.push(object);
+
+    Some(bincode::serialize(&list).unwrap())
+}
+
 pub struct Files {
     // _db: sled::Db,
     /// A tree that maps an [Object] to it's data 
@@ -429,11 +443,13 @@ impl Files {
             objects, roots
         };
 
+        files.roots.set_merge_operator(append_merge);
+
         // if root node does not exist, create it 
         if files.roots.get("root")?.is_none() {
             let dir = Node::new_dir();
             let object = files.serialize(&dir)?;
-            files.roots.insert("root", object.hash())?;
+            files.roots.merge("root", object.hash())?;
         }
 
         Ok(files)
@@ -442,17 +458,23 @@ impl Files {
     /// Perform operations on a given `root`
     pub fn with_root<T>(&self, root: &str, op: impl Fn(&mut Node) -> anyhow::Result<T>) -> anyhow::Result<T> {
         // load root node from database
-        let hash = self.roots.get(root)?
+        log::info!("loading root '{root}' history");
+        let history = self.roots.get(root)?
             .ok_or(io::Error::new(io::ErrorKind::NotFound, "root not found"))?;
-        let object = Object::from_hash((&hash[..]).try_into().unwrap());
-        let mut node = self.deserialize(&object)?;
+
+        let history: Vec<Object> = bincode::deserialize(&history[..])?;
+
+        let object = history.last().unwrap();
+
+        let mut node = self.deserialize(object)?;
 
         // perform operation on node
         let result = op(&mut node)?;
 
         // re-serialize and store new root 
+        log::info!("appending new root node to history");
         let object = self.serialize(&node)?;
-        self.roots.insert(root, object.hash())?;
+        self.roots.merge(root, object.hash())?;
 
         Ok(result)
     }
