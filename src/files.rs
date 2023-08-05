@@ -407,16 +407,17 @@ impl<'a> Iterator for FileList<'a> {
     }
 }
 
-fn append_merge(_key: &[u8], old_value: Option<&[u8]>, merged_bytes: &[u8]) -> Option<Vec<u8>> {
-    let mut list: Vec<Object> = if let Some(bytes) = old_value {
+fn root_merge(_key: &[u8], old_value: Option<&[u8]>, merged_bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut list: Vec<(u128, Object)> = if let Some(bytes) = old_value {
         bincode::deserialize(bytes).unwrap()
     } else {
         vec![]
     };
 
     let object = Object::from_hash(merged_bytes.try_into().unwrap());
+    let timestamp = SystemTime::UNIX_EPOCH.elapsed().unwrap().as_nanos();
 
-    list.push(object);
+    list.push((timestamp, object));
 
     Some(bincode::serialize(&list).unwrap())
 }
@@ -443,7 +444,7 @@ impl Files {
             objects, roots
         };
 
-        files.roots.set_merge_operator(append_merge);
+        files.roots.set_merge_operator(root_merge);
 
         // if root node does not exist, create it 
         if files.roots.get("root")?.is_none() {
@@ -462,9 +463,10 @@ impl Files {
         let history = self.roots.get(root)?
             .ok_or(io::Error::new(io::ErrorKind::NotFound, "root not found"))?;
 
-        let history: Vec<Object> = bincode::deserialize(&history[..])?;
+        // deserialise root into it's history
+        let history: Vec<(u128, Object)> = bincode::deserialize(&history[..])?;
 
-        let object = history.last().unwrap();
+        let object = history.last().map(|(_,o)| o).unwrap();
 
         let mut node = self.deserialize(object)?;
 
