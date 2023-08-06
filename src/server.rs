@@ -265,13 +265,13 @@ impl Method for Clear {
 pub struct Rollback;
 
 impl Method for Rollback {
-    type Input<'a> = ();
+    type Input<'a> = Revision;
     type Output = ();
 
     const NAME: &'static str = "ROLLBACK";
 
-    fn call<'a>(files: &Files, _: Self::Input<'a>) -> anyhow::Result<Self::Output> {
-        let mut old_root = files.get_root("root", Revision::FromEarliest(0))?;
+    fn call<'a>(files: &Files, revision: Self::Input<'a>) -> anyhow::Result<Self::Output> {
+        let mut old_root = files.get_root("root", revision)?;
         let new_root = files.get_root("root", Revision::FromLatest(0))?;
 
         old_root.merge(new_root)?;

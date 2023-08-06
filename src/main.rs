@@ -11,6 +11,8 @@ use std::{path::PathBuf, net::SocketAddr};
 
 use chrono::TimeZone;
 use clap::Parser;
+use files::Revision;
+use server::Rollback;
 use tokio::net::TcpStream;
 
 // fn print_files(files: &files::Files) -> sled::Result<()> {
@@ -46,6 +48,19 @@ enum Command {
 }
 
 #[derive(Parser)]
+enum RollbackCommand {
+    Time {
+        time: u128
+    },
+    Earliest {
+        index: usize
+    },
+    Latest {
+        index: usize
+    }
+}
+
+#[derive(Parser)]
 enum Method {
     Get {
         #[arg(short, long)]
@@ -65,7 +80,10 @@ enum Method {
     },
 
     GetListing,
-    Rollback,
+    Rollback {
+        #[command(subcommand)]
+        revision: RollbackCommand
+    },
     Clear
 }
 
@@ -177,8 +195,14 @@ async fn cli(addr: SocketAddr, method: Method) -> anyhow::Result<()> {
             proto::invoke(&mut stream, server::Delete, path).await?;
         },
 
-        Method::Rollback => {
-            proto::invoke(&mut stream, server::Rollback, ()).await?;
+        Method::Rollback { revision } => {
+            let revision = match revision {
+                RollbackCommand::Time { time } => Revision::AsOfTime(time),
+                RollbackCommand::Earliest { index } => Revision::FromEarliest(index),
+                RollbackCommand::Latest { index } => Revision::FromLatest(index)
+            };
+
+            proto::invoke(&mut stream, server::Rollback, revision).await?;
         }
     }
 
