@@ -12,7 +12,6 @@ use std::{path::PathBuf, net::SocketAddr};
 use chrono::TimeZone;
 use clap::Parser;
 use files::Revision;
-use server::Rollback;
 use tokio::net::TcpStream;
 
 // fn print_files(files: &files::Files) -> sled::Result<()> {
