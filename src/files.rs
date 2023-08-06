@@ -4,6 +4,7 @@ use std::{collections::HashMap, io};
 use std::path::Path as SysPath;
 use std::fmt::Debug;
 
+use chrono::TimeZone;
 use digest::Digest;
 
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
@@ -203,7 +204,7 @@ impl<'a> std::fmt::Display for Path<'a> {
 #[derive(Serialize, Deserialize, Debug)]
 pub enum NodeData {
     Dir(HashMap<String, Node>),
-    File(Object)
+    File(Option<Object>)
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -241,7 +242,7 @@ impl Node {
 
     /// Create a new [Node::File] referencing a given [Object] 
     pub fn new_file(object: Object) -> Node {
-        Node::new(NodeData::File(object))
+        Node::new(NodeData::File(Some(object)))
     }
 
     /// Returns `Some(map)` if `self` is [Node::Dir]
@@ -255,7 +256,7 @@ impl Node {
 
     /// Returns `Some(object)` if `self` is [Node::Dir]
     pub fn file(&mut self) -> Option<&mut Object> {
-        if let NodeData::File(object) = &mut self.data {
+        if let NodeData::File(Some(object)) = &mut self.data {
             Some(object)
         } else {
             None
@@ -275,14 +276,10 @@ impl Node {
         }
     }
 
-    /// Returns a mutable reference to a given child. Will error if `self` is not a directory, or if the child is not found
-    pub fn get_child(&mut self, name: &str) -> io::Result<&mut Node> {
+    /// Returns a mutable reference to a given child. Will error if `self` is not a directory
+    pub fn get_child(&mut self, name: &str) -> io::Result<Option<&mut Node>> {
         if let Some(map) = self.dir() {
-            if let Some(child) = map.get_mut(&name.to_string()) {
-                Ok(child)
-            } else {
-                Err(io::ErrorKind::NotFound.into())
-            }
+            Ok(map.get_mut(&name.to_string()))
         } else {
             Err(io::ErrorKind::NotADirectory.into())
         }
@@ -300,17 +297,21 @@ impl Node {
     }
 
     /// Returns a mutable reference to a [Node] at a given [Path], relative to `self`
-    pub fn traverse(&mut self, path: Path) -> io::Result<&mut Node> {
+    pub fn traverse(&mut self, path: Path) -> io::Result<Option<&mut Node>> {
         if path.as_str() != "/" {
             let mut current = self;
 
             for part in path.parts() {
-                current = current.get_child(&part)?;
+                current = if let Some(node) = current.get_child(&part)? {
+                    node
+                } else {
+                    return Ok(None)
+                }
             }
 
-            Ok(current)
+            Ok(Some(current))
         } else {
-            Ok(self)
+            Ok(Some(self))
         }
     }
 
@@ -325,7 +326,8 @@ impl Node {
     /// Make a directory at a given path relative to `self`. Will error if `self` is not a [Node::Dir], or if the parent of a given folder does not exist.
     pub fn make_dir(&mut self, path: Path) -> io::Result<()> {
         if let (path, Some(name)) = path.parent_child() {
-            let node = self.traverse(path)?;
+            let node = self.traverse(path)?
+                .ok_or(io::ErrorKind::NotFound)?;
 
             if !node.has_child(name)? {
                 node.insert_child(name, Node::new_dir())?;
@@ -350,7 +352,8 @@ impl Node {
     pub fn insert(&mut self, path: Path, object: Object) -> io::Result<()> {
         if let (path, Some(name)) = path.parent_child() {
             // self.make_dir_recursive(path)?;
-            let node = self.traverse(path)?;
+            let node = self.traverse(path)?
+                .ok_or(io::ErrorKind::NotFound)?;
             node.insert_child(name, Node::new_file(object))?;
 
             Ok(())
@@ -358,6 +361,42 @@ impl Node {
             let err: io::Error = io::ErrorKind::InvalidFilename.into();
             Err(err.into())
         }
+    }
+
+    pub fn delete(&mut self, path: Path) -> io::Result<()> {
+        let node = self.traverse(path)?
+            .ok_or(io::ErrorKind::NotFound)?;
+
+        if let NodeData::File(object) = &mut node.data {
+            *object = None;
+            node.timestamp = SystemTime::UNIX_EPOCH.elapsed().unwrap().as_nanos();
+
+            Ok(())
+        } else {
+            let err: io::Error = io::ErrorKind::InvalidFilename.into();
+            Err(err)
+        }
+    }
+
+    pub fn merge(&mut self, mut rhs: Node) -> io::Result<()> {
+        let timestamp = SystemTime::UNIX_EPOCH.elapsed().unwrap().as_nanos();
+
+        for (path, ..) in rhs.file_list()? {
+            let path = Path::new(&path).unwrap();
+            let (parent, child) = path.parent_child();
+            let child = child.unwrap();
+
+            self.make_dir_recursive(parent)?;
+            let node = self.traverse(parent)?.unwrap();
+
+            if let Some(child) = node.get_child(child)? {
+                child.timestamp = timestamp;
+            } else {
+                node.insert_child(child, Node { data: NodeData::File(None), timestamp })?;
+            }
+        }
+
+        Ok(())
     }
 
     pub fn file_list<'a>(&'a mut self) -> io::Result<FileList<'a>> {
@@ -374,11 +413,11 @@ impl Node {
 
 pub struct FileList<'a> {
     node_stack: Vec<(String, &'a mut Node)>,
-    output_stack: Vec<(String, Object, u128)>,
+    output_stack: Vec<(String, Option<Object>, u128)>,
 }
 
 impl<'a> Iterator for FileList<'a> {
-    type Item = (String, Object, u128);
+    type Item = (String, Option<Object>, u128);
 
     fn next(&mut self) -> Option<Self::Item> {
         if !self.output_stack.is_empty() {
@@ -393,7 +432,7 @@ impl<'a> Iterator for FileList<'a> {
                         NodeData::Dir(_) => self.node_stack.push((format!("{}{}/", path, name), node)),
 
                         // if it is a file, push it to the output stack 
-                        NodeData::File(object) => self.output_stack.push((format!("{}{}", path, name), object.clone(), node.timestamp()))
+                        NodeData::File(object) => self.output_stack.push((format!("{}{}", path, name), object.clone(), node.timestamp())),
                     }
                 }
 
@@ -430,6 +469,13 @@ pub struct Files {
     roots: sled::Tree
 }
 
+#[derive(Serialize, Deserialize, Copy, Clone)]
+pub enum Revision {
+    FromLatest(usize),
+    FromEarliest(usize),
+    AsOfTime(u128)
+}
+
 impl Files {
     /// Opens a [Files] database from a given path, and initialises it
     // TODO: stop re-initialising the database on each open
@@ -456,8 +502,7 @@ impl Files {
         Ok(files)
     }
 
-    /// Perform operations on a given `root`
-    pub fn with_root<T>(&self, root: &str, op: impl Fn(&mut Node) -> anyhow::Result<T>) -> anyhow::Result<T> {
+    pub fn get_root(&self, root: &str, revision: Revision) -> anyhow::Result<Node> {
         // load root node from database
         log::info!("loading root '{root}' history");
         let history = self.roots.get(root)?
@@ -466,17 +511,46 @@ impl Files {
         // deserialise root into it's history
         let history: Vec<(u128, Object)> = bincode::deserialize(&history[..])?;
 
-        let object = history.last().map(|(_,o)| o).unwrap();
+        // get the right node based on the query
+        let (timestamp, object) = match revision {
+            Revision::FromLatest(n) => history.iter().nth_back(n).unwrap(),
+            Revision::FromEarliest(n) => history.iter().nth(n).unwrap(),
+            Revision::AsOfTime(n) => history.iter().take_while(|(t,_)| t < &n).last().unwrap(),
+        };
 
-        let mut node = self.deserialize(object)?;
+        // get date-time
+        let timestamp = chrono::Local.timestamp_nanos(*timestamp as i64);
+
+        log::info!("found node {} for root '{root}', created {timestamp}", object.hex());
+
+        // deserialise node
+        let node = self.deserialize(object)?;
+
+        Ok(node)
+    }
+
+    pub fn set_root(&self, root: &str, node: Node) -> anyhow::Result<()> {
+        log::info!("appending node to root '{root}' history");
+
+        let object = self.serialize(&node)?;
+        self.roots.merge(root, object.hash())?;
+
+        log::info!("appended node {} to history of root '{root}'", object.hex());
+
+        Ok(())
+    }
+
+    /// Perform operations on a given `root`
+    pub fn with_root<T>(&self, root: &str, op: impl Fn(&mut Node) -> anyhow::Result<T>) -> anyhow::Result<T> {
+        log::info!("performing operation on root '{root}'");
+
+        let mut node = self.get_root(root, Revision::FromLatest(0))?;
 
         // perform operation on node
         let result = op(&mut node)?;
 
         // re-serialize and store new root 
-        log::info!("appending new root node to history");
-        let object = self.serialize(&node)?;
-        self.roots.merge(root, object.hash())?;
+        self.set_root(root, node)?;
 
         Ok(result)
     }
@@ -490,7 +564,7 @@ impl Files {
         // create a new root node
         let dir = Node::new_dir();
         let object = self.serialize(&dir)?;
-        self.roots.insert("root", object.hash())?;
+        self.roots.merge("root", object.hash())?;
 
         Ok(())
     }

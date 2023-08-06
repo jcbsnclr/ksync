@@ -1,3 +1,4 @@
+use notify::EventKind;
 use notify::Watcher;
 use tokio::sync::mpsc;
 use tokio::net;
@@ -30,6 +31,9 @@ impl SyncClient {
     pub async fn init(config: config::Sync) -> anyhow::Result<SyncClient> {
         // create the channel used to send events to the sync client
         let (send, event_queue) = mpsc::channel(1024);
+        send.send(SyncEvent::Resync).await?;
+
+        // init_resync only re-syncs files that already exist locally; perform a proper re-sync afterwards to retrieve any files we missed
         let send_timer = send.clone();
 
         // initialise the watcher; tell it to notify 
@@ -88,21 +92,25 @@ impl SyncClient {
             let hash: [u8; 32] = hasher.finalize().try_into().unwrap();
 
             if let Some((object, timestamp)) = listing.get(&remote_path) {
-                // file exists on the remote server
+                if let Some(object) = object {
+                    // file exists on the remote server
+                    if object.hash() != &hash && timestamp > &metadata.modified()? {
+                        // the local copy of the file is out of date
+                        log::info!("local copy of {remote_path} out of date; retrieving from server");
 
-                if object.hash() != &hash && timestamp > &metadata.modified()? {
-                    // the local copy of the file is out of date
-                    log::info!("local copy of {remote_path} out of date; retrieving from server");
+                        // fetch server's copy and store to disk
+                        let data = proto::invoke(&mut self.remote, server::Get, remote_path).await?;
+                        tokio::fs::write(path, &data).await?;
+                    } else if object.hash() != &hash && timestamp < &metadata.modified()? {
+                        // the local copy of the file is newer than the remote copy
+                        log::info!("local copy of {remote_path} newer than remote copy; uploading to server");
 
-                    // fetch server's copy and store to disk
-                    let data = proto::invoke(&mut self.remote, server::Get, remote_path).await?;
-                    tokio::fs::write(path, &data).await?;
-                } else if object.hash() != &hash && timestamp < &metadata.modified()? {
-                    // the local copy of the file is newer than the remote copy
-                    log::info!("local copy of {remote_path} newer than remote copy; uploading to server");
-
-                    // upload local copy to server
-                    proto::invoke(&mut self.remote, server::Insert, (remote_path, contents)).await?;
+                        // upload local copy to server
+                        proto::invoke(&mut self.remote, server::Insert, (remote_path, contents)).await?;
+                    }
+                } else {
+                    // file has been deleted
+                    tokio::fs::remove_file(path).await?;
                 }
             } else {
                 // local file does not exist on server
@@ -126,6 +134,12 @@ impl SyncClient {
                 // a file has been updated in the sync folder
                 SyncEvent::Notify(event) => {
                     let event = event?;
+
+                    // we only want to handle modification events rn
+                    if !matches!(event.kind, EventKind::Modify(_)) {
+                        continue
+                    }
+
                     log::info!("got event {:#?}", event);
 
                     // create map of remote path -> metadata
@@ -151,7 +165,7 @@ impl SyncClient {
                             let hash: [u8; 32] = hasher.finalize().try_into().unwrap();
             
                             // if the server's copy of the file's hash matches the local copy, do nothing
-                            if let Some((object, _)) = files.get(&remote_path)  {
+                            if let Some((Some(object), _)) = files.get(&remote_path)  {
                                 if object.hash() == &hash {
                                     continue
                                 }
@@ -180,7 +194,7 @@ impl SyncClient {
 
                         log::info!("file: {}", local_path.to_string_lossy());
 
-                        if !local_path.exists() {
+                        if !local_path.exists() && !object.is_none() {
                             // file does not exist locally; recursively make folders, and fetch from server
                             tokio::fs::create_dir_all(local_path.parent().unwrap_or(&self.dir)).await?;
                             let data = proto::invoke(&mut self.remote, server::Get, remote_path).await?;
@@ -201,10 +215,16 @@ impl SyncClient {
                             let time = SystemTime::UNIX_EPOCH + Duration::from_nanos(*timestamp as u64);
 
                             // check if local and remote hashes match, and compare timestamps
-                            if &hash != object.hash() && time > metadata.modified()? {
-                                // local file is out of date; fetch from server
-                                let data = proto::invoke(&mut self.remote, server::Get, remote_path).await?;
-                                tokio::fs::write(&local_path, data).await?;
+                            if let Some(object) = object {
+                                if &hash != object.hash() && time > metadata.modified()? {
+                                    // local file is out of date; fetch from server
+                                    let data = proto::invoke(&mut self.remote, server::Get, remote_path).await?;
+                                    tokio::fs::write(&local_path, data).await?;
+                                }
+                            } else {
+                                // file has been deleted
+                                log::info!("file {remote_path} has been deleted; deleting local copy");
+                                tokio::fs::remove_file(&local_path).await?;
                             }
                         }
                     }

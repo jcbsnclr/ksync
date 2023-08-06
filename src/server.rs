@@ -7,7 +7,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::{SystemTime, Duration};
 
-use crate::files::{Files, Object};
+use crate::files::{Files, Object, Revision};
 use crate::config;
 use crate::files::Path;
 use crate::proto::{self, Method, MethodFn};
@@ -65,6 +65,8 @@ impl Server {
             .add(Insert)
             .add(GetListing)
             .add(Clear)
+            .add(Delete)
+            .add(Rollback)
             .build(config).await
     }
 
@@ -139,7 +141,7 @@ impl Method for Get {
         log::info!("retrieving file {path}");
 
         let object = files.with_root("root", |node| {
-            if let Some(&mut object) = node.traverse(path)?.file() {
+            if let Some(&mut object) = node.traverse(path)?.and_then(|n| n.file()) {
                 Ok(object)
             } else {
                 let err: io::Error = io::ErrorKind::InvalidInput.into();
@@ -183,16 +185,37 @@ impl Method for Insert {
     }
 }
 
+pub struct Delete;
+
+impl Method for Delete {
+    type Input<'a> = Path<'a>;
+    type Output = ();
+
+    const NAME: &'static str = "DELETE";
+
+    fn call<'a>(files: &Files, path: Self::Input<'a>) -> anyhow::Result<Self::Output> {
+        log::info!("deleting file {path}");
+
+        files.with_root("root", |node| {
+            node.delete(path)?;
+
+            Ok(())
+        })?;
+
+        Ok(())
+    }
+}
+
 /// A list of files stored on the server, with their path, object, and timestamp
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct FileListing(Vec<(String, Object, u128)>);
+pub struct FileListing(Vec<(String, Option<Object>, u128)>);
 
 impl FileListing {
-    pub fn iter(&self) -> impl Iterator<Item = &(String, Object, u128)> {
+    pub fn iter(&self) -> impl Iterator<Item = &(String, Option<Object>, u128)> {
         self.0.iter()
     }
 
-    pub fn as_map<'a>(&'a self) -> HashMap<Path<'a>, (Object, SystemTime)> {
+    pub fn as_map<'a>(&'a self) -> HashMap<Path<'a>, (Option<Object>, SystemTime)> {
         let files = self
             .iter()
             .map(|(p,o,t)| (Path::new(p).unwrap(), (o.clone(), SystemTime::UNIX_EPOCH + Duration::from_nanos(*t as u64))));
@@ -234,6 +257,26 @@ impl Method for Clear {
     fn call<'a>(files: &Files, _: Self::Input<'a>) -> anyhow::Result<Self::Output> {
         log::info!("clearing database");
         files.clear()?;
+
+        Ok(())
+    }
+}
+
+pub struct Rollback;
+
+impl Method for Rollback {
+    type Input<'a> = ();
+    type Output = ();
+
+    const NAME: &'static str = "ROLLBACK";
+
+    fn call<'a>(files: &Files, _: Self::Input<'a>) -> anyhow::Result<Self::Output> {
+        let mut old_root = files.get_root("root", Revision::FromEarliest(0))?;
+        let new_root = files.get_root("root", Revision::FromLatest(0))?;
+
+        old_root.merge(new_root)?;
+
+        files.set_root("root", old_root)?;
 
         Ok(())
     }

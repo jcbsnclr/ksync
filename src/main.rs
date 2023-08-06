@@ -59,8 +59,13 @@ enum Method {
         #[arg(short, long)]
         from: PathBuf
     },
+    Delete {
+        #[arg(short, long)]
+        path: String
+    },
 
     GetListing,
+    Rollback,
     Clear
 }
 
@@ -154,12 +159,26 @@ async fn cli(addr: SocketAddr, method: Method) -> anyhow::Result<()> {
             for (path, object, timestamp) in list.iter() {
                 let timestamp = chrono::Local.timestamp_nanos(*timestamp as i64);
 
-                println!("{}: {} @ {}", path, object.hex(), timestamp);
+                if let Some(object) = object {
+                    println!("{}: {} @ {}", path, object.hex(), timestamp);
+                } else {
+                    println!("{}: DELETED @ {}", path, timestamp);
+                }
             }
         },
 
         Method::Clear => {
             proto::invoke(&mut stream, server::Clear, ()).await?;
+        },
+
+        Method::Delete { path } => {
+            let path = files::Path::new(&path)?;
+
+            proto::invoke(&mut stream, server::Delete, path).await?;
+        },
+
+        Method::Rollback => {
+            proto::invoke(&mut stream, server::Rollback, ()).await?;
         }
     }
 
