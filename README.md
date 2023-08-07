@@ -41,20 +41,54 @@ ksync daemon -c [CONFIG FILE]
 ksync cli [IP ADDRESS] [METHOD] [ARGS...]
 ```
 
+**Note:** You can run `ksync -h` to see basic usage information. You can also ask for help for a given subcommand in the same way, e.g. `ksync cli 127.0.0.1:8080 get -h`.
+
 ## Command-line interface
-Currently, `ksync` exposes only a few commands:
+Currently, `ksync` exposes only a few commands.
+
+## `insert`, `get`, and `delete`
+You can insert and retrieve files from the ksync database via the `insert` and `get` subcommands respectively.
 ```sh
 # insert a file into the database
 ksync cli 127.0.0.1:8080 insert --from example/test.txt --to /files/test.txt
 # retrieve a file from the database
 ksync cli 127.0.0.1:8080 get --from /files/test.txt --to example/test.txt
+```
+You cal also use `-f` and `-t` in place of `--from` and `--to`.
+
+You can also delete files via the `delete` command
+```sh
+ksync cli 127.0.0.1:8080 delete --path /files/test.txt
+ksync cli 127.0.0.1:8080 delete -p /files/test.txt
+```
+
+## `get-listing` and `get-node`
+At the moment, the `get-listing` and `get-node` subcommands function virtually identically, returning a listing of files on the server, however `get-node` takes in an argument `-p` for you to specify the path to get a listing from. This is part of a broader move to make more operations relative to a given path or revision of the filesystem.
+```sh
 # get a list of files from the database in the format of `<PATH>: <HASH> @ <DATE-TIME>`
 ksync cli 127.0.0.1:8080 get-listing 
 # clear the database of a given server
 ksync cli 127.0.0.1:8080 clear
 ```
 
-You can run `ksync -h` to see basic usage information. You can also ask for help for a given subcommand in the same way, e.g. `ksync cli 127.0.0.1:8080 get -h`.
+## `clear` and `rollback`
+The `clear` command is used to clear the `ksync` database, reverting it back to an empty file server with only the root (`/`) node. You can `rollback``:
+ * by a number relative to the latest version of the filesystem
+ * by a number relative to the earliest version of the filesystem
+ * to a given time
+Keep in mind that the time is the number of nanoseconds since the UNIX epoch. There will be date/time parsing for this purpose later on.
+
+```sh
+# clear the database
+ksync cli 127.0.0.1:8080 clear
+
+# rollback to the earliest revision of the filesystem
+ksync cli 127.0.0.1:8080 rollback earliest 0
+# rollback the last 3 version of the filesystem
+ksync cli 127.0.0.1:8080 rollback latest 3
+# rollback to a given time (UNIX timestamp in nanoseconds)
+ksync cli 127.0.0.1:8080 rollback time 1234567891011121314
+```
 
 # Configuration
 The configuration for `ksync` is very simple (both by design, and because it is so early in it's development). 
