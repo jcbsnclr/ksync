@@ -78,6 +78,11 @@ enum Method {
         path: String
     },
 
+    GetNode {
+        #[arg(short, long)]
+        path: String
+    },
+
     GetListing,
     Rollback {
         #[command(subcommand)]
@@ -183,6 +188,24 @@ async fn cli(addr: SocketAddr, method: Method) -> anyhow::Result<()> {
                 }
             }
         },
+
+        Method::GetNode { path } => {
+            let path = files::Path::new(&path)?;
+
+            let mut node = proto::invoke(&mut stream, server::GetNode, (path, Revision::FromLatest(0))).await?;
+
+            println!("Entries in {path}:");
+
+            for (path, object, timestamp) in node.file_list()? {
+                let timestamp = chrono::Local.timestamp_nanos(timestamp as i64);
+
+                if let Some(object) = object {
+                    println!("{}: {} @ {}", path, object.hex(), timestamp.format("%v_%X"));
+                } else {
+                    println!("{}: DELETED @ {}", path, timestamp);
+                }
+            }
+        }
 
         Method::Clear => {
             proto::invoke(&mut stream, server::Clear, ()).await?;

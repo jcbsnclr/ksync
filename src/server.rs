@@ -7,7 +7,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::{SystemTime, Duration};
 
-use crate::files::{Files, Object, Revision};
+use crate::files::{Files, Object, Revision, Node};
 use crate::config;
 use crate::files::Path;
 use crate::proto::{self, Method, MethodFn};
@@ -67,6 +67,7 @@ impl Server {
             .add(Clear)
             .add(Delete)
             .add(Rollback)
+            .add(GetNode)
             .build(config).await
     }
 
@@ -140,7 +141,7 @@ impl Method for Get {
     fn call<'a>(files: &Files, path: Self::Input<'a>) -> anyhow::Result<Self::Output> {
         log::info!("retrieving file {path}");
 
-        let object = files.with_root("root", |node| {
+        let object = files.with_root("root", Revision::FromLatest(0), |node| {
             if let Some(&mut object) = node.traverse(path)?.and_then(|n| n.file()) {
                 Ok(object)
             } else {
@@ -174,7 +175,7 @@ impl Method for Insert {
 
         let object = files.create_object(&data)?;
 
-        files.with_root("root", |node| {
+        files.with_root_mut("root", |node| {
             node.make_dir_recursive(parent)?;
             node.insert(path, object)?;
             Ok(())
@@ -196,7 +197,7 @@ impl Method for Delete {
     fn call<'a>(files: &Files, path: Self::Input<'a>) -> anyhow::Result<Self::Output> {
         log::info!("deleting file {path}");
 
-        files.with_root("root", |node| {
+        files.with_root_mut("root", |node| {
             node.delete(path)?;
 
             Ok(())
@@ -237,7 +238,7 @@ impl Method for GetListing {
     fn call<'a>(files: &Files, _: Self::Input<'a>) -> anyhow::Result<Self::Output> {
         log::info!("retrieving file listing");
 
-        let output = files.with_root("root", |node| {
+        let output = files.with_root("root", Revision::FromLatest(0), |node| {
             Ok(FileListing(node.file_list()?.collect()))
         })?;
 
@@ -271,13 +272,39 @@ impl Method for Rollback {
     const NAME: &'static str = "ROLLBACK";
 
     fn call<'a>(files: &Files, revision: Self::Input<'a>) -> anyhow::Result<Self::Output> {
+        // the node to roll back to
         let mut old_root = files.get_root("root", revision)?;
+        // the current node to merge with the root
         let new_root = files.get_root("root", Revision::FromLatest(0))?;
 
+        // merge nodes to mark any files that don't exist in the old node as deleted
         old_root.merge(new_root)?;
 
         files.set_root("root", old_root)?;
 
         Ok(())
+    }
+}
+
+pub struct GetNode;
+
+impl Method for GetNode {
+    type Input<'a> = (Path<'a>, Revision);
+    type Output = Node;
+
+    const NAME: &'static str = "GET_NODE";
+
+    fn call<'a>(files: &Files, (path, revision): Self::Input<'a>) -> anyhow::Result<Self::Output> {
+        files.with_root("root", revision, |node| {
+            // find the node at the given path
+            if let Some(node) = node.traverse(path)? {
+                // node found; return
+                Ok(node.clone())
+            } else {
+                // note not found; error
+                let err: io::Error = io::ErrorKind::NotFound.into();
+                Err(err.into())
+            }
+        })
     }
 }

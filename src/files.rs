@@ -201,13 +201,13 @@ impl<'a> std::fmt::Display for Path<'a> {
 }
 
 /// A [Node] represents a filesystem tree
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum NodeData {
     Dir(HashMap<String, Node>),
     File(Option<Object>)
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Node {
     data: NodeData,
     timestamp: u128
@@ -383,6 +383,7 @@ impl Node {
 
         for (path, ..) in rhs.file_list()? {
             let path = Path::new(&path).unwrap();
+
             let (parent, child) = path.parent_child();
             let child = child.unwrap();
 
@@ -530,8 +531,6 @@ impl Files {
     }
 
     pub fn set_root(&self, root: &str, node: Node) -> anyhow::Result<()> {
-        log::info!("appending node to root '{root}' history");
-
         let object = self.serialize(&node)?;
         self.roots.merge(root, object.hash())?;
 
@@ -541,9 +540,10 @@ impl Files {
     }
 
     /// Perform operations on a given `root`
-    pub fn with_root<T>(&self, root: &str, op: impl Fn(&mut Node) -> anyhow::Result<T>) -> anyhow::Result<T> {
-        log::info!("performing operation on root '{root}'");
+    pub fn with_root_mut<T>(&self, root: &str, op: impl Fn(&mut Node) -> anyhow::Result<T>) -> anyhow::Result<T> {
+        log::info!("mutating root '{root}'");
 
+        // we can only mutate the latest revision of the filesystem.
         let mut node = self.get_root(root, Revision::FromLatest(0))?;
 
         // perform operation on node
@@ -551,6 +551,17 @@ impl Files {
 
         // re-serialize and store new root 
         self.set_root(root, node)?;
+
+        Ok(result)
+    }
+
+    pub fn with_root<T>(&self, root: &str, revision: Revision, op: impl Fn(&mut Node) -> anyhow::Result<T>) -> anyhow::Result<T> {
+        log::info!("accessing root '{root}'");
+
+        let mut node = self.get_root(root, revision)?;
+
+        // perform operation on node
+        let result = op(&mut node)?;
 
         Ok(result)
     }
