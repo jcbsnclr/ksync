@@ -12,7 +12,7 @@ impl<'a> From<&'a [u8]> for HexSlice<'a> {
 impl<'a> fmt::Display for HexSlice<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for byte in self.0 {
-            write!(f, "{byte:x}")?;
+            write!(f, "{byte:02x}")?;
         }
         Ok(())
     }

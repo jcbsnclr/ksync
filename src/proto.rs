@@ -4,7 +4,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 
-use crate::files::Files;
+use crate::{files::Files, server::Context};
 
 /// Reads exactly `N` bytes from a given `reader`, and returns it as a static array
 pub async fn read_array<const N: usize, R: AsyncReadExt + Unpin>(reader: &mut R) -> io::Result<[u8; N]> {
@@ -127,7 +127,7 @@ pub async fn write_packet<W: AsyncWriteExt + Unpin, T: Serialize>(writer: &mut W
 }
 
 /// A type signature representing an implementation of [Method::call_bytes]
-pub type MethodFn = fn(&Files, bytes: Vec<u8>) -> anyhow::Result<Vec<u8>>;
+pub type MethodFn = fn(&Files, &mut Context, bytes: Vec<u8>) -> anyhow::Result<Vec<u8>>;
 
 /// The [Method] trait is used to implement different methods of the protocol (e.g. `GET`, `INSERT`, etc.)
 pub trait Method {
@@ -138,16 +138,16 @@ pub trait Method {
     const NAME: &'static str;
 
     /// A wrapper over [Method::call] that deserialises input, and serialises output, automatically
-    fn call_bytes(files: &Files, bytes: Vec<u8>) -> anyhow::Result<Vec<u8>> {
+    fn call_bytes(files: &Files, ctx: &mut Context, bytes: Vec<u8>) -> anyhow::Result<Vec<u8>> {
         let input = bincode::deserialize(&bytes)?;
-        let output = Self::call(files, input)?;
+        let output = Self::call(files, ctx, input)?;
         let output_bytes = bincode::serialize(&output)?;
 
         Ok(output_bytes)
     }
 
     /// The functionality to be invoked when a method is called
-    fn call<'a>(files: &Files, input: Self::Input<'a>) -> anyhow::Result<Self::Output>;
+    fn call<'a>(files: &Files, ctx: &mut Context, input: Self::Input<'a>) -> anyhow::Result<Self::Output>;
 }
 
 /// Invokes a given [Method] on a server

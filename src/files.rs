@@ -448,7 +448,7 @@ impl<'a> Iterator for FileList<'a> {
 }
 
 fn root_merge(_key: &[u8], old_value: Option<&[u8]>, merged_bytes: &[u8]) -> Option<Vec<u8>> {
-    let mut list: Vec<(u128, Object)> = if let Some(bytes) = old_value {
+    let mut list: RootHistory = if let Some(bytes) = old_value {
         bincode::deserialize(bytes).unwrap()
     } else {
         vec![]
@@ -470,7 +470,9 @@ pub struct Files {
     roots: sled::Tree
 }
 
-#[derive(Serialize, Deserialize, Copy, Clone)]
+pub type RootHistory = Vec<(u128, Object)>;
+
+#[derive(Serialize, Deserialize, Debug, Copy, Clone)]
 pub enum Revision {
     FromLatest(usize),
     FromEarliest(usize),
@@ -503,16 +505,23 @@ impl Files {
         Ok(files)
     }
 
-    pub fn get_root(&self, root: &str, revision: Revision) -> anyhow::Result<Node> {
-        // load root node from database
+    pub fn get_root_history(&self, root: &str) -> anyhow::Result<RootHistory> {
         log::info!("loading root '{root}' history");
         let history = self.roots.get(root)?
             .ok_or(io::Error::new(io::ErrorKind::NotFound, "root not found"))?;
 
         // deserialise root into it's history
-        let history: Vec<(u128, Object)> = bincode::deserialize(&history[..])?;
+        let history: RootHistory = bincode::deserialize(&history[..])?;
+
+        Ok(history)
+    }
+
+    pub fn get_root(&self, root: &str, revision: Revision) -> anyhow::Result<Node> {
+        // load root node from database
+        let history = self.get_root_history(root)?;
 
         // get the right node based on the query
+        // TODO: proper handling of no history errors
         let (timestamp, object) = match revision {
             Revision::FromLatest(n) => history.iter().nth_back(n).unwrap(),
             Revision::FromEarliest(n) => history.iter().nth(n).unwrap(),
