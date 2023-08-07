@@ -14,7 +14,7 @@ While this is perfectly fine (and honestly would have worked for my purposes), t
 1. rollbacks require either using snapshots (e.g. via `btrfs`), or manually archiving the sync folder.
 2. compression and file de-duplication are reliant on the host filesystem to work, otherwise are non-existent. 
 
-`ksync` aims to - though currently does not (see the [roadmap](ROADMAP.md)) solve the first problem through it's immutable design; whenever the filesystem tree is updated, it will create a new tree, and old trees will be able to be accessed simply by going back through a list of instances of the filesystem.
+`ksync` solves (in an incomplete fashion, see; [#1](https://github.com/jcbsnclr/ksync/issues/1)) the first problem through it's immutable design; whenever the filesystem tree is updated, it creates a new tree, and old trees will be able to be accessed simply by going back through a list of instances of the filesystem.
 
 The second problem is already solved by `ksync`. While compression is not yet enabled, `sled` does support it, so it should simply be a case of enabling it in the codebase (will be done when the need arises). File de-duplication is already solved, as "objects" (pieces of data stored on the server), are indexed via a hash of their contents. This means that 2 files that have the same contents will occupy the same object.
 
