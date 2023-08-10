@@ -7,6 +7,7 @@ mod proto;
 mod util;
 mod sync;
 mod client;
+mod batch;
 
 use std::{path::PathBuf, net::SocketAddr};
 
@@ -15,6 +16,7 @@ use clap::Parser;
 use files::Revision;
 
 use server::methods;
+use batch::{Method, RollbackCommand};
 
 // fn print_files(files: &files::Files) -> sled::Result<()> {
 //     println!("objects:");
@@ -41,61 +43,16 @@ enum Command {
         config: PathBuf
     },
 
-    Cli {
+    RunBatch {
+        addr: SocketAddr,
+        script: PathBuf
+    },
+
+    Invoke {
         addr: SocketAddr,
         #[command(subcommand)]
-        method: Method
+        method: batch::Method
     }
-}
-
-#[derive(Parser)]
-enum RollbackCommand {
-    Time {
-        time: u128
-    },
-    Earliest {
-        index: usize
-    },
-    Latest {
-        index: usize
-    }
-}
-
-#[derive(Parser)]
-enum Method {
-    Get {
-        #[arg(short, long)]
-        to: PathBuf,
-        #[arg(short, long)]
-        from: String
-    },
-    Insert {
-        #[arg(short, long)]
-        to: String,
-        #[arg(short, long)]
-        from: PathBuf
-    },
-    Delete {
-        #[arg(short, long)]
-        path: String
-    },
-
-    GetNode {
-        #[arg(short, long)]
-        path: String
-    },
-
-    GetHistory {
-        #[command(subcommand)]
-        revision: Option<RollbackCommand>
-    },
-
-    GetListing,
-    Rollback {
-        #[command(subcommand)]
-        revision: RollbackCommand
-    },
-    Clear
 }
 
 #[derive(Parser)]
@@ -157,117 +114,23 @@ async fn main() -> anyhow::Result<()> {
         },
 
         // user has invoked the command line interface
-        Command::Cli { addr, method } => cli(addr, method).await?
+        Command::RunBatch { addr, script } => batch(addr, script).await?,
+
+        Command::Invoke { addr, method } => {
+            let mut client = client::Client::connect(addr).await?;
+            batch::run_method(&mut client, method).await?;
+        }
     }
 
     Ok(())
 }
 
-async fn cli(addr: SocketAddr, method: Method) -> anyhow::Result<()> {
+async fn batch(addr: SocketAddr, script: PathBuf) -> anyhow::Result<()> {
     // connect to remote server
     let mut client = client::Client::connect(addr).await?;
+    let script = tokio::fs::read_to_string(&script).await?;
 
-    match method {
-        Method::Get { to, from } => {
-            let path = files::Path::new(&from)?;
-            let response = client.invoke(methods::Get, path).await?;
-
-            tokio::fs::write(to, response).await?;
-        },
-
-        Method::Insert { to, from } => {
-            let path = files::Path::new(&to)?;
-            let data = tokio::fs::read(from).await?;
-
-            client.invoke(methods::Insert, (path, data)).await?;
-        },
-
-        Method::GetHistory { revision } => {
-            let history = client.invoke(methods::GetHistory, ()).await?;
-
-            let range = match revision {
-                Some(RollbackCommand::Earliest { index }) => index..history.len(),
-                Some(RollbackCommand::Latest { index }) => 0..index,
-                Some(RollbackCommand::Time { time }) => {
-                    let index = history.iter()
-                        .enumerate()
-                        .take_while(|(_, &(t,_))| t <= time)
-                        .last()
-                        .map(|(i,_)| i)
-                        .unwrap();
-
-                    0..index
-                },
-
-                None => 0..history.len()
-            };
-
-            if range.end >= history.len() {
-
-            }
-
-            let slice = &history[range.clone()];
-
-            println!("Filesystem History:");
-            for (index, &(timestamp, object)) in range.zip(slice) {
-                let timestamp = chrono::Local.timestamp_nanos(timestamp as i64);
-
-                println!("  [{index:04}] revision {} @{} UTC", object.hex(), timestamp.format("%v-%X"));
-            }
-        }
-
-        Method::GetListing => {
-            let list = client.invoke(methods::GetListing, ()).await?;
-
-            for (path, object, timestamp) in list.iter() {
-                let timestamp = chrono::Local.timestamp_nanos(*timestamp as i64);
-
-                if let Some(object) = object {
-                    println!("{}: {} @ {}", path, object.hex(), timestamp);
-                } else {
-                    println!("{}: DELETED @ {}", path, timestamp);
-                }
-            }
-        },
-
-        Method::GetNode { path } => {
-            let path = files::Path::new(&path)?;
-
-            let mut node = client.invoke(methods::GetNode, (path, Revision::FromLatest(0))).await?;
-
-            println!("Entries in {path}:");
-
-            for (path, object, timestamp) in node.file_list()? {
-                let timestamp = chrono::Utc.timestamp_nanos(timestamp as i64);
-
-                if let Some(object) = object {
-                    println!("  {}: {} @{} UTC", path, object.hex(), timestamp.format("%v_%X"));
-                } else {
-                    println!("  {}: DELETED @ {}", path, timestamp);
-                }
-            }
-        }
-
-        Method::Clear => {
-            client.invoke(methods::Clear, ()).await?;
-        },
-
-        Method::Delete { path } => {
-            let path = files::Path::new(&path)?;
-
-            client.invoke(methods::Delete, path).await?;
-        },
-
-        Method::Rollback { revision } => {
-            let revision = match revision {
-                RollbackCommand::Time { time } => Revision::AsOfTime(time),
-                RollbackCommand::Earliest { index } => Revision::FromEarliest(index),
-                RollbackCommand::Latest { index } => Revision::FromLatest(index)
-            };
-
-            client.invoke(methods::Rollback, revision).await?;
-        }
-    }
+    batch::run_batch(&mut client, &script).await?;
 
     Ok(())
 }
