@@ -1,7 +1,6 @@
 use notify::EventKind;
 use notify::Watcher;
 use tokio::sync::mpsc;
-use tokio::net;
 
 use digest::Digest;
 
@@ -12,7 +11,7 @@ use std::time::SystemTime;
 use crate::config;
 use crate::files::Path;
 use crate::server::methods;
-use crate::proto;
+use crate::client::Client;
 
 enum SyncEvent {
     Notify(notify::Result<notify::Event>),
@@ -23,7 +22,7 @@ pub struct SyncClient {
     _watcher: notify::RecommendedWatcher,
     event_queue: mpsc::Receiver<SyncEvent>,
     dir: PathBuf,
-    remote: net::TcpStream
+    client: Client
 }
 
 impl SyncClient {
@@ -46,7 +45,7 @@ impl SyncClient {
         watcher.watch(&dir, notify::RecursiveMode::Recursive)?;
 
         // open connection with server
-        let remote = net::TcpStream::connect(config.remote).await?;
+        let client = Client::connect(config.remote).await?;
 
         // spawn thread to request a re-sync. time between re-syncs is configurable
         tokio::spawn(async move {
@@ -59,7 +58,7 @@ impl SyncClient {
             }
         });
 
-        Ok(SyncClient { _watcher: watcher, event_queue, dir, remote })
+        Ok(SyncClient { _watcher: watcher, event_queue, dir, client })
     }
 
     /// Performs the initial re-sync between the client and server, ensuring both are up-to-date with any local/remote changes
@@ -72,7 +71,7 @@ impl SyncClient {
         log::info!("getting file listing from server");
 
         // retrieve server's file listing
-        let listing = proto::invoke(&mut self.remote, methods::GetListing, ()).await?;
+        let listing = self.client.invoke(methods::GetListing, ()).await?;
         let listing = listing.as_map();
 
         for path in files.filter_map(Result::ok).filter(|p| p.is_file()) {
@@ -99,14 +98,14 @@ impl SyncClient {
                         log::info!("local copy of {remote_path} out of date; retrieving from server");
 
                         // fetch server's copy and store to disk
-                        let data = proto::invoke(&mut self.remote, methods::Get, remote_path).await?;
+                        let data = self.client.invoke(methods::Get, remote_path).await?;
                         tokio::fs::write(path, &data).await?;
                     } else if object.hash() != &hash && timestamp < &metadata.modified()? {
                         // the local copy of the file is newer than the remote copy
                         log::info!("local copy of {remote_path} newer than remote copy; uploading to server");
 
                         // upload local copy to server
-                        proto::invoke(&mut self.remote, methods::Insert, (remote_path, contents)).await?;
+                        self.client.invoke(methods::Insert, (remote_path, contents)).await?;
                     }
                 } else {
                     // file has been deleted
@@ -117,7 +116,7 @@ impl SyncClient {
                 log::info!("local copy of {remote_path} does not exist in remote; uploading to server");
                 
                 // upload it to the server
-                proto::invoke(&mut self.remote, methods::Insert, (remote_path, contents)).await?;
+                self.client.invoke(methods::Insert, (remote_path, contents)).await?;
             }
         }
 
@@ -143,7 +142,7 @@ impl SyncClient {
                     log::info!("got event {:#?}", event);
 
                     // create map of remote path -> metadata
-                    let files = proto::invoke(&mut self.remote, methods::GetListing, ()).await?;
+                    let files = self.client.invoke(methods::GetListing, ()).await?;
                     let files = files.as_map();
     
                     // iterate over files in event
@@ -173,7 +172,7 @@ impl SyncClient {
 
                             // upload file to server
                             log::info!("inserting file {} -> {remote_path}", path.to_string_lossy());
-                            proto::invoke(&mut self.remote, methods::Insert, (remote_path, data)).await?;
+                            self.client.invoke(methods::Insert, (remote_path, data)).await?;
                         }
                     }
                 },
@@ -183,7 +182,7 @@ impl SyncClient {
                     log::info!("re-syncing with server");
 
                     // get file listing from server and create iterator over it 
-                    let files = proto::invoke(&mut self.remote, methods::GetListing, ()).await?;
+                    let files = self.client.invoke(methods::GetListing, ()).await?;
                     let files = files.iter();
 
                     for (path, object, timestamp) in files {
@@ -197,7 +196,7 @@ impl SyncClient {
                         if !local_path.exists() && !object.is_none() {
                             // file does not exist locally; recursively make folders, and fetch from server
                             tokio::fs::create_dir_all(local_path.parent().unwrap_or(&self.dir)).await?;
-                            let data = proto::invoke(&mut self.remote, methods::Get, remote_path).await?;
+                            let data = self.client.invoke(methods::Get, remote_path).await?;
                             tokio::fs::write(local_path, data).await?;
                         } else if local_path.exists() {
                             // file exists locally
@@ -218,7 +217,7 @@ impl SyncClient {
                             if let Some(object) = object {
                                 if &hash != object.hash() && time > metadata.modified()? {
                                     // local file is out of date; fetch from server
-                                    let data = proto::invoke(&mut self.remote, methods::Get, remote_path).await?;
+                                    let data = self.client.invoke(methods::Get, remote_path).await?;
                                     tokio::fs::write(&local_path, data).await?;
                                 }
                             } else {

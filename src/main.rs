@@ -6,13 +6,13 @@ mod config;
 mod proto;
 mod util;
 mod sync;
+mod client;
 
 use std::{path::PathBuf, net::SocketAddr};
 
 use chrono::TimeZone;
 use clap::Parser;
 use files::Revision;
-use tokio::net::TcpStream;
 
 use server::methods;
 
@@ -165,12 +165,12 @@ async fn main() -> anyhow::Result<()> {
 
 async fn cli(addr: SocketAddr, method: Method) -> anyhow::Result<()> {
     // connect to remote server
-    let mut stream = TcpStream::connect(addr).await?;
+    let mut client = client::Client::connect(addr).await?;
 
     match method {
         Method::Get { to, from } => {
             let path = files::Path::new(&from)?;
-            let response = proto::invoke(&mut stream, methods::Get, path).await?;
+            let response = client.invoke(methods::Get, path).await?;
 
             tokio::fs::write(to, response).await?;
         },
@@ -179,11 +179,11 @@ async fn cli(addr: SocketAddr, method: Method) -> anyhow::Result<()> {
             let path = files::Path::new(&to)?;
             let data = tokio::fs::read(from).await?;
 
-            proto::invoke(&mut stream, methods::Insert, (path, data)).await?;
+            client.invoke(methods::Insert, (path, data)).await?;
         },
 
         Method::GetHistory { revision } => {
-            let history = proto::invoke(&mut stream, methods::GetHistory, ()).await?;
+            let history = client.invoke(methods::GetHistory, ()).await?;
 
             let range = match revision {
                 Some(RollbackCommand::Earliest { index }) => index..history.len(),
@@ -217,7 +217,7 @@ async fn cli(addr: SocketAddr, method: Method) -> anyhow::Result<()> {
         }
 
         Method::GetListing => {
-            let list = proto::invoke(&mut stream, methods::GetListing, ()).await?;
+            let list = client.invoke(methods::GetListing, ()).await?;
 
             for (path, object, timestamp) in list.iter() {
                 let timestamp = chrono::Local.timestamp_nanos(*timestamp as i64);
@@ -233,7 +233,7 @@ async fn cli(addr: SocketAddr, method: Method) -> anyhow::Result<()> {
         Method::GetNode { path } => {
             let path = files::Path::new(&path)?;
 
-            let mut node = proto::invoke(&mut stream, methods::GetNode, (path, Revision::FromLatest(0))).await?;
+            let mut node = client.invoke(methods::GetNode, (path, Revision::FromLatest(0))).await?;
 
             println!("Entries in {path}:");
 
@@ -249,13 +249,13 @@ async fn cli(addr: SocketAddr, method: Method) -> anyhow::Result<()> {
         }
 
         Method::Clear => {
-            proto::invoke(&mut stream, methods::Clear, ()).await?;
+            client.invoke(methods::Clear, ()).await?;
         },
 
         Method::Delete { path } => {
             let path = files::Path::new(&path)?;
 
-            proto::invoke(&mut stream, methods::Delete, path).await?;
+            client.invoke(methods::Delete, path).await?;
         },
 
         Method::Rollback { revision } => {
@@ -265,7 +265,7 @@ async fn cli(addr: SocketAddr, method: Method) -> anyhow::Result<()> {
                 RollbackCommand::Latest { index } => Revision::FromLatest(index)
             };
 
-            proto::invoke(&mut stream, methods::Rollback, revision).await?;
+            client.invoke(methods::Rollback, revision).await?;
         }
     }
 
