@@ -54,7 +54,10 @@ pub enum Method {
         #[command(subcommand)]
         revision: RollbackCommand
     },
-    Clear
+    Clear,
+
+    Increment,
+    GetCtx
 }
 
 pub async fn run_method(client: &mut Client, method: Method) -> anyhow::Result<()> {
@@ -157,6 +160,15 @@ pub async fn run_method(client: &mut Client, method: Method) -> anyhow::Result<(
             };
 
             client.invoke(methods::Rollback, revision).await?;
+        },
+
+        Method::Increment => {
+            client.invoke(methods::Increment, ()).await?;
+        },
+
+        Method::GetCtx => {
+            let n = client.invoke(methods::GetCtx, ()).await?;
+            println!("context is '{n}'");
         }
     }
 

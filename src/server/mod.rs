@@ -68,6 +68,8 @@ impl Server {
             .add(methods::Rollback)
             .add(methods::GetNode)
             .add(methods::GetHistory)
+            .add(methods::GetCtx)
+            .add(methods::Increment)
             .build(config).await
     }
 

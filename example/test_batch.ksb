@@ -1,2 +1,6 @@
-insert -t /files/test.txt -f example/test.txt 
-get -t abc.txt -f /files/test.txt
+get-ctx
+increment 
+increment
+get-ctx
+increment
+get-ctx

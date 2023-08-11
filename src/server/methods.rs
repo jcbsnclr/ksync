@@ -207,3 +207,31 @@ impl Method for GetHistory {
         Ok(history)
     }
 }
+
+pub struct Increment;
+
+impl Method for Increment {
+    type Input<'a> = ();
+    type Output = ();
+
+    const NAME: &'static str = "INCREMENT";
+
+    fn call<'a>(_: &Files, ctx: &mut Context, _: Self::Input<'a>) -> anyhow::Result<Self::Output> {
+        ctx.0 += 1;
+
+        Ok(())
+    }
+}
+
+pub struct GetCtx;
+
+impl Method for GetCtx {
+    type Input<'a> = ();
+    type Output = u64;
+
+    const NAME: &'static str = "GET_CTX";
+
+    fn call<'a>(_: &Files, ctx: &mut Context, _: Self::Input<'a>) -> anyhow::Result<Self::Output> {
+        Ok(ctx.0)
+    }
+}

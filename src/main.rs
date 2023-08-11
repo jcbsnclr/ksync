@@ -11,12 +11,7 @@ mod batch;
 
 use std::{path::PathBuf, net::SocketAddr};
 
-use chrono::TimeZone;
 use clap::Parser;
-use files::Revision;
-
-use server::methods;
-use batch::{Method, RollbackCommand};
 
 // fn print_files(files: &files::Files) -> sled::Result<()> {
 //     println!("objects:");
@@ -48,7 +43,7 @@ enum Command {
         script: PathBuf
     },
 
-    Invoke {
+    Cli {
         addr: SocketAddr,
         #[command(subcommand)]
         method: batch::Method
@@ -116,7 +111,7 @@ async fn main() -> anyhow::Result<()> {
         // user has invoked the command line interface
         Command::RunBatch { addr, script } => batch(addr, script).await?,
 
-        Command::Invoke { addr, method } => {
+        Command::Cli { addr, method } => {
             let mut client = client::Client::connect(addr).await?;
             batch::run_method(&mut client, method).await?;
         }
