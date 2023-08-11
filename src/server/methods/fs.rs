@@ -1,13 +1,8 @@
-use serde::{Serialize, Deserialize};
-
 use std::io;
-use std::time::{Duration, SystemTime};
-use std::collections::HashMap;
 
-use super::Context;
-
-use crate::files::{Files, Path, Revision, Object, Node, RootHistory};
 use crate::proto::Method;
+use crate::files::{Files, Path, Revision, Node, RootHistory};
+use crate::server::Context;
 
 /// The [Get] method resolves a virtual filesystem [Path] to it's respective object, loads it, and sends it back to the client
 pub struct Get;
@@ -84,45 +79,6 @@ impl Method for Delete {
         })?;
 
         Ok(())
-    }
-}
-
-/// A list of files stored on the server, with their path, object, and timestamp
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct FileListing(Vec<(String, Option<Object>, u128)>);
-
-impl FileListing {
-    pub fn iter(&self) -> impl Iterator<Item = &(String, Option<Object>, u128)> {
-        self.0.iter()
-    }
-
-    pub fn as_map<'a>(&'a self) -> HashMap<Path<'a>, (Option<Object>, SystemTime)> {
-        let files = self
-            .iter()
-            .map(|(p,o,t)| (Path::new(p).unwrap(), (o.clone(), SystemTime::UNIX_EPOCH + Duration::from_nanos(*t as u64))));
-
-        HashMap::from_iter(files)
-    }
-}
-
-/// Retrieves a [FileListing] from the server
-pub struct GetListing;
-
-impl Method for GetListing {
-    type Input<'a> = ();
-    type Output = FileListing;
-    // type Output = ();
-
-    const NAME: &'static str = "GET_TREE";
-
-    fn call<'a>(files: &Files, _: &mut Context, _: Self::Input<'a>) -> anyhow::Result<Self::Output> {
-        log::info!("retrieving file listing");
-
-        let output = files.with_root("root", Revision::FromLatest(0), |node| {
-            Ok(FileListing(node.file_list()?.collect()))
-        })?;
-
-        Ok(output)
     }
 }
 
@@ -208,30 +164,12 @@ impl Method for GetHistory {
     }
 }
 
-pub struct Increment;
-
-impl Method for Increment {
-    type Input<'a> = ();
-    type Output = ();
-
-    const NAME: &'static str = "INCREMENT";
-
-    fn call<'a>(_: &Files, ctx: &mut Context, _: Self::Input<'a>) -> anyhow::Result<Self::Output> {
-        ctx.num += 1;
-
-        Ok(())
-    }
-}
-
-pub struct GetCtx;
-
-impl Method for GetCtx {
-    type Input<'a> = ();
-    type Output = u64;
-
-    const NAME: &'static str = "GET_CTX";
-
-    fn call<'a>(_: &Files, ctx: &mut Context, _: Self::Input<'a>) -> anyhow::Result<Self::Output> {
-        Ok(ctx.num)
-    }
+pub fn register(ctx: &mut Context) {
+    ctx.register(&Get);
+    ctx.register(&Insert);
+    ctx.register(&Delete);
+    ctx.register(&Clear);
+    ctx.register(&Rollback);
+    ctx.register(&GetNode);
+    ctx.register(&GetHistory);
 }

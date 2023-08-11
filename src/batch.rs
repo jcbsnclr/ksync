@@ -22,6 +22,8 @@ pub enum RollbackCommand {
 
 #[derive(Parser)]
 pub enum Method {
+    Identify,
+
     Get {
         #[arg(short, long)]
         to: PathBuf,
@@ -49,22 +51,22 @@ pub enum Method {
         revision: Option<RollbackCommand>
     },
 
-    GetListing,
     Rollback {
         #[command(subcommand)]
         revision: RollbackCommand
     },
-    Clear,
-
-    Increment,
-    GetCtx
+    Clear
 }
 
 pub async fn run_method(client: &mut Client, method: Method) -> anyhow::Result<()> {
     match method {
+        Method::Identify => {
+            client.invoke(methods::auth::Identify, ()).await?;
+        }
+
         Method::Get { to, from } => {
             let path = files::Path::new(&from)?;
-            let response = client.invoke(methods::Get, path).await?;
+            let response = client.invoke(methods::fs::Get, path).await?;
 
             tokio::fs::write(to, response).await?;
         },
@@ -73,11 +75,11 @@ pub async fn run_method(client: &mut Client, method: Method) -> anyhow::Result<(
             let path = files::Path::new(&to)?;
             let data = tokio::fs::read(from).await?;
 
-            client.invoke(methods::Insert, (path, data)).await?;
+            client.invoke(methods::fs::Insert, (path, data)).await?;
         },
 
         Method::GetHistory { revision } => {
-            let history = client.invoke(methods::GetHistory, ()).await?;
+            let history = client.invoke(methods::fs::GetHistory, ()).await?;
 
             let range = match revision {
                 Some(RollbackCommand::Earliest { index }) => index..history.len(),
@@ -108,26 +110,12 @@ pub async fn run_method(client: &mut Client, method: Method) -> anyhow::Result<(
 
                 println!("  [{index:04}] revision {} @{} UTC", object.hex(), timestamp.format("%v-%X"));
             }
-        }
-
-        Method::GetListing => {
-            let list = client.invoke(methods::GetListing, ()).await?;
-
-            for (path, object, timestamp) in list.iter() {
-                let timestamp = chrono::Local.timestamp_nanos(*timestamp as i64);
-
-                if let Some(object) = object {
-                    println!("{}: {} @ {}", path, object.hex(), timestamp);
-                } else {
-                    println!("{}: DELETED @ {}", path, timestamp);
-                }
-            }
         },
 
         Method::GetNode { path } => {
             let path = files::Path::new(&path)?;
 
-            let mut node = client.invoke(methods::GetNode, (path, Revision::FromLatest(0))).await?;
+            let mut node = client.invoke(methods::fs::GetNode, (path, Revision::FromLatest(0))).await?;
 
             println!("Entries in {path}:");
 
@@ -143,13 +131,13 @@ pub async fn run_method(client: &mut Client, method: Method) -> anyhow::Result<(
         }
 
         Method::Clear => {
-            client.invoke(methods::Clear, ()).await?;
+            client.invoke(methods::fs::Clear, ()).await?;
         },
 
         Method::Delete { path } => {
             let path = files::Path::new(&path)?;
 
-            client.invoke(methods::Delete, path).await?;
+            client.invoke(methods::fs::Delete, path).await?;
         },
 
         Method::Rollback { revision } => {
@@ -159,16 +147,7 @@ pub async fn run_method(client: &mut Client, method: Method) -> anyhow::Result<(
                 RollbackCommand::Latest { index } => Revision::FromLatest(index)
             };
 
-            client.invoke(methods::Rollback, revision).await?;
-        },
-
-        Method::Increment => {
-            client.invoke(methods::Increment, ()).await?;
-        },
-
-        Method::GetCtx => {
-            let n = client.invoke(methods::GetCtx, ()).await?;
-            println!("context is '{n}'");
+            client.invoke(methods::fs::Rollback, revision).await?;
         }
     }
 

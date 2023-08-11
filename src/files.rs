@@ -417,6 +417,13 @@ pub struct FileList<'a> {
     output_stack: Vec<(String, Option<Object>, u128)>,
 }
 
+impl<'a> FileList<'a> {
+    pub fn as_map(self) -> HashMap<String, (Option<Object>, u128)> {
+        self.map(|(path, object, timestamp)| (path, (object, timestamp)))
+            .collect()
+    }
+}
+
 impl<'a> Iterator for FileList<'a> {
     type Item = (String, Option<Object>, u128);
 

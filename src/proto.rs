@@ -59,7 +59,7 @@ pub enum Error {
     #[error("invalid protocol '{proto:?}'")]
     InvalidProtocol { proto: [u8; 8] },
 
-    // #[error("unknown method {method}")]
+    // #[error("unknown method '{method}'")]
     // UnknownMethod { method: String } 
 }
 
@@ -127,6 +127,7 @@ pub async fn write_packet<W: AsyncWriteExt + Unpin, T: Serialize>(writer: &mut W
 }
 
 /// The [Method] trait is used to implement different methods of the protocol (e.g. `GET`, `INSERT`, etc.)
+/// This trait is used to automatically convert to/from bincode over the wire
 pub trait Method: Send + Sync + 'static {
     type Input<'a>: Serialize + Deserialize<'a>;
     type Output: Serialize + DeserializeOwned;
@@ -138,11 +139,15 @@ pub trait Method: Send + Sync + 'static {
     fn call<'a>(files: &Files, ctx: &mut Context, input: Self::Input<'a>) -> anyhow::Result<Self::Output>;
 }
 
+/// The [RawMethod] trait is wrapper over the [Method] trait that allows us to store [Method]s as trait objects.
+/// Unlike [Method], this trait sends raw bytes over the wire, and so is not generic.
 pub trait RawMethod: Send + Sync {
     /// A wrapper over [Method::call] that deserialises input, and serialises output, automatically
     fn call_bytes(&self, files: &Files, ctx: &mut Context, bytes: Vec<u8>) -> anyhow::Result<Vec<u8>>;
 }
 
+// we implement RawMethod for all types that implement the Method trait, in order to be able to store them in a connection's
+// context
 impl<T> RawMethod for T
 where T: Method {
     fn call_bytes(&self, files: &Files, ctx: &mut Context, bytes: Vec<u8>) -> anyhow::Result<Vec<u8>> {

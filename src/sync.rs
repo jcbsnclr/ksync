@@ -10,6 +10,7 @@ use std::time::SystemTime;
 
 use crate::config;
 use crate::files::Path;
+use crate::files::Revision;
 use crate::server::methods;
 use crate::client::Client;
 
@@ -71,13 +72,13 @@ impl SyncClient {
         log::info!("getting file listing from server");
 
         // retrieve server's file listing
-        let listing = self.client.invoke(methods::GetListing, ()).await?;
-        let listing = listing.as_map();
+        let mut listing = self.client.invoke(methods::fs::GetNode, (Path::new("/")?, Revision::FromLatest(0))).await?;
+        let listing = listing.file_list()?.as_map();
 
         for path in files.filter_map(Result::ok).filter(|p| p.is_file()) {
             // work out the remote path of a local file
             let remote_path = format!("/{}", path.strip_prefix(&self.dir)?.to_str().unwrap());
-            let remote_path = Path::new(&remote_path)?;
+            // let remote_path = Path::new(&remote_path)?;
 
             log::info!("processing file {}", remote_path);
 
@@ -92,20 +93,22 @@ impl SyncClient {
 
             if let Some((object, timestamp)) = listing.get(&remote_path) {
                 if let Some(object) = object {
+                    let timestamp = SystemTime::UNIX_EPOCH + Duration::from_nanos(*timestamp as u64);
+
                     // file exists on the remote server
-                    if object.hash() != &hash && timestamp > &metadata.modified()? {
+                    if object.hash() != &hash && timestamp > metadata.modified()? {
                         // the local copy of the file is out of date
                         log::info!("local copy of {remote_path} out of date; retrieving from server");
 
                         // fetch server's copy and store to disk
-                        let data = self.client.invoke(methods::Get, remote_path).await?;
+                        let data = self.client.invoke(methods::fs::Get, Path::new(&remote_path)?).await?;
                         tokio::fs::write(path, &data).await?;
-                    } else if object.hash() != &hash && timestamp < &metadata.modified()? {
+                    } else if object.hash() != &hash && timestamp < metadata.modified()? {
                         // the local copy of the file is newer than the remote copy
                         log::info!("local copy of {remote_path} newer than remote copy; uploading to server");
 
                         // upload local copy to server
-                        self.client.invoke(methods::Insert, (remote_path, contents)).await?;
+                        self.client.invoke(methods::fs::Insert, (Path::new(&remote_path)?, contents)).await?;
                     }
                 } else {
                     // file has been deleted
@@ -116,7 +119,7 @@ impl SyncClient {
                 log::info!("local copy of {remote_path} does not exist in remote; uploading to server");
                 
                 // upload it to the server
-                self.client.invoke(methods::Insert, (remote_path, contents)).await?;
+                self.client.invoke(methods::fs::Insert, (Path::new(&remote_path)?, contents)).await?;
             }
         }
 
@@ -142,8 +145,8 @@ impl SyncClient {
                     log::info!("got event {:#?}", event);
 
                     // create map of remote path -> metadata
-                    let files = self.client.invoke(methods::GetListing, ()).await?;
-                    let files = files.as_map();
+                    let mut files = self.client.invoke(methods::fs::GetNode, (Path::new("/")?, Revision::FromLatest(0))).await?;
+                    let files = files.file_list()?.as_map();
     
                     // iterate over files in event
                     for path in event.paths {
@@ -151,7 +154,7 @@ impl SyncClient {
                         if path.starts_with(&self.dir) && path.is_file() {
                             // strip sync folder from file's path to determine it's remote path
                             let remote_path = format!("/{}", path.strip_prefix(&self.dir)?.to_str().unwrap());
-                            let remote_path = Path::new(&remote_path)?;
+                            // let remote_path = Path::new(&remote_path)?;
     
                             log::info!("path: {}, remote_path: {}", path.to_string_lossy(), remote_path);
     
@@ -172,7 +175,7 @@ impl SyncClient {
 
                             // upload file to server
                             log::info!("inserting file {} -> {remote_path}", path.to_string_lossy());
-                            self.client.invoke(methods::Insert, (remote_path, data)).await?;
+                            self.client.invoke(methods::fs::Insert, (Path::new(&remote_path)?, data)).await?;
                         }
                     }
                 },
@@ -182,11 +185,11 @@ impl SyncClient {
                     log::info!("re-syncing with server");
 
                     // get file listing from server and create iterator over it 
-                    let files = self.client.invoke(methods::GetListing, ()).await?;
-                    let files = files.iter();
+                    let mut files = self.client.invoke(methods::fs::GetNode, (Path::new("/")?, Revision::FromLatest(0))).await?;
+                    let files = files.file_list()?;
 
                     for (path, object, timestamp) in files {
-                        let remote_path = Path::new(path)?;
+                        let remote_path = Path::new(&path)?;
 
                         // strip first char from path, and join it to the sync folder, to get the file's location
                         let local_path = self.dir.join(&path[1..]);
@@ -196,7 +199,7 @@ impl SyncClient {
                         if !local_path.exists() && !object.is_none() {
                             // file does not exist locally; recursively make folders, and fetch from server
                             tokio::fs::create_dir_all(local_path.parent().unwrap_or(&self.dir)).await?;
-                            let data = self.client.invoke(methods::Get, remote_path).await?;
+                            let data = self.client.invoke(methods::fs::Get, remote_path).await?;
                             tokio::fs::write(local_path, data).await?;
                         } else if local_path.exists() {
                             // file exists locally
@@ -211,13 +214,13 @@ impl SyncClient {
                             let hash: [u8; 32] = hasher.finalize().try_into().unwrap();
 
                             // work out timestamp based on UNIX epoch + offset
-                            let time = SystemTime::UNIX_EPOCH + Duration::from_nanos(*timestamp as u64);
+                            let time = SystemTime::UNIX_EPOCH + Duration::from_nanos(timestamp as u64);
 
                             // check if local and remote hashes match, and compare timestamps
                             if let Some(object) = object {
                                 if &hash != object.hash() && time > metadata.modified()? {
                                     // local file is out of date; fetch from server
-                                    let data = self.client.invoke(methods::Get, remote_path).await?;
+                                    let data = self.client.invoke(methods::fs::Get, remote_path).await?;
                                     tokio::fs::write(&local_path, data).await?;
                                 }
                             } else {
