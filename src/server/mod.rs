@@ -27,7 +27,6 @@ pub struct Server {
 
 pub struct Context {
     addr: SocketAddr,
-    pub num: u64,
     methods: HashMap<&'static str, &'static dyn RawMethod>
 }
 
@@ -35,23 +34,26 @@ impl Context {
     pub fn init(addr: SocketAddr) -> Context {
         Context {
             addr,
-            num: 0,
             methods: HashMap::new()
         }
     }
 
+    /// Returns the socket address a [Context] concerns
     pub fn addr(&self) -> SocketAddr {
         self.addr
     }
 
+    /// Register a given [Method] with the [Context]
     pub fn register<M: Method>(&mut self, method: &'static M) {
         self.methods.insert(M::NAME, method);
     }
 
+    /// De-registers a given [Method] from the [Context]
     pub fn deregister<M: Method>(&mut self, _method: &'static M) {
         self.methods.remove(M::NAME);
     }
 
+    /// Calls the respective method for a context based on a request [Packet]
     pub fn dispatch(&mut self, files: &Files, packet: Packet) -> anyhow::Result<Vec<u8>> {
         // dispatch request to respective method handler
         let handler = self.methods.get(&packet.method[..])

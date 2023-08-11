@@ -46,7 +46,7 @@ impl SyncClient {
         watcher.watch(&dir, notify::RecursiveMode::Recursive)?;
 
         // open connection with server
-        let client = Client::connect(config.remote).await?;
+        let mut client = Client::connect(config.remote).await?;
 
         // spawn thread to request a re-sync. time between re-syncs is configurable
         tokio::spawn(async move {
@@ -58,6 +58,8 @@ impl SyncClient {
                 send.send(SyncEvent::Resync).await.unwrap();
             }
         });
+
+        client.invoke(methods::auth::Identify, ()).await?;
 
         Ok(SyncClient { _watcher: watcher, event_queue, dir, client })
     }

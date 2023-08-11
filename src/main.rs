@@ -1,4 +1,4 @@
-#![feature(io_error_more)]
+#![feature(io_error_more, async_fn_in_trait)]
 
 mod files;
 mod server;

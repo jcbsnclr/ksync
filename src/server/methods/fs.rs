@@ -13,8 +13,10 @@ impl Method for Get {
 
     const NAME: &'static str = "GET";
 
-    fn call<'a>(files: &Files, _: &mut Context, path: Self::Input<'a>) -> anyhow::Result<Self::Output> {
-        log::info!("retrieving file {path}");
+    fn call<'a>(files: &Files, ctx: &mut Context, path: Self::Input<'a>) -> anyhow::Result<Self::Output> {
+        let addr = ctx.addr();
+
+        log::info!("client {addr} retrieving file {path}");
 
         let object = files.with_root("root", Revision::FromLatest(0), |node| {
             if let Some(&mut object) = node.traverse(path)?.and_then(|n| n.file()) {
@@ -25,7 +27,7 @@ impl Method for Get {
             }
         })?;
 
-        log::info!("got object {}; returning", object.hex());
+        log::info!("got object {}; returning to {addr}", object.hex());
 
         let data = files.get(&object)?;
 
@@ -42,9 +44,10 @@ impl Method for Insert {
 
     const NAME: &'static str = "INSERT";
 
-    fn call<'a>(files: &Files, _: &mut Context, (path, data): Self::Input<'a>) -> anyhow::Result<Self::Output> {
-        log::info!("storing file {path}");
-        log::info!("file contents: {:?}", String::from_utf8_lossy(&data));
+    fn call<'a>(files: &Files, ctx: &mut Context, (path, data): Self::Input<'a>) -> anyhow::Result<Self::Output> {
+        let addr = ctx.addr();
+
+        log::info!("client {addr} storing file {path}");
         
         let (parent, _) = path.parent_child();
 
@@ -69,8 +72,10 @@ impl Method for Delete {
 
     const NAME: &'static str = "DELETE";
 
-    fn call<'a>(files: &Files, _: &mut Context, path: Self::Input<'a>) -> anyhow::Result<Self::Output> {
-        log::info!("deleting file {path}");
+    fn call<'a>(files: &Files, ctx: &mut Context, path: Self::Input<'a>) -> anyhow::Result<Self::Output> {
+        let addr = ctx.addr();
+
+        log::info!("client {addr} deleting file {path}");
 
         files.with_root_mut("root", |node| {
             node.delete(path)?;
@@ -91,8 +96,10 @@ impl Method for Clear {
 
     const NAME: &'static str = "CLEAR";
 
-    fn call<'a>(files: &Files, _: &mut Context, _: Self::Input<'a>) -> anyhow::Result<Self::Output> {
-        log::info!("clearing database");
+    fn call<'a>(files: &Files, ctx: &mut Context, _: Self::Input<'a>) -> anyhow::Result<Self::Output> {
+        let addr = ctx.addr();
+
+        log::info!("client {addr} clearing database");
         files.clear()?;
 
         Ok(())
@@ -107,8 +114,10 @@ impl Method for Rollback {
 
     const NAME: &'static str = "ROLLBACK";
 
-    fn call<'a>(files: &Files, _: &mut Context, revision: Self::Input<'a>) -> anyhow::Result<Self::Output> {
-        log::info!("rolling back filesystem to revision {:?}", revision);
+    fn call<'a>(files: &Files, ctx: &mut Context, revision: Self::Input<'a>) -> anyhow::Result<Self::Output> {
+        let addr = ctx.addr();
+
+        log::info!("client {addr} rolling back filesystem to revision {:?}", revision);
 
         // the node to roll back to
         let mut old_root = files.get_root("root", revision)?;
@@ -132,7 +141,11 @@ impl Method for GetNode {
 
     const NAME: &'static str = "GET_NODE";
 
-    fn call<'a>(files: &Files, _: &mut Context, (path, revision): Self::Input<'a>) -> anyhow::Result<Self::Output> {
+    fn call<'a>(files: &Files, ctx: &mut Context, (path, revision): Self::Input<'a>) -> anyhow::Result<Self::Output> {
+        let addr = ctx.addr();
+
+        log::info!("client {addr} requested node {} @ {:?}", path.as_str(), revision);
+
         files.with_root("root", revision, |node| {
             // find the node at the given path
             if let Some(node) = node.traverse(path)? {
@@ -155,8 +168,10 @@ impl Method for GetHistory {
 
     const NAME: &'static str = "GET_HISTORY";
 
-    fn call<'a>(files: &Files, _: &mut Context, _: Self::Input<'a>) -> anyhow::Result<Self::Output> {
-        log::info!("retrieving history for root 'root'");
+    fn call<'a>(files: &Files, ctx: &mut Context, _: Self::Input<'a>) -> anyhow::Result<Self::Output> {
+        let addr = ctx.addr();
+
+        log::info!("client {addr} requested history for root 'root'");
 
         let history = files.get_root_history("root")?;
 
