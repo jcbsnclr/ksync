@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::config;
 use crate::files::Files;
-use crate::proto::{self, Method, MethodFn};
+use crate::proto::{self, Method, RawMethod};
 
 /// Represents the different protocol-specific errors that can be encountered while the server is running
 #[derive(Debug, thiserror::Error)]
@@ -22,55 +22,35 @@ pub enum Error {
 pub struct Server {
     listener: net::TcpListener,
     files: Arc<Files>,
-    /// A map of a [Method]'s [Method::NAME] to it's [Method::call_bytes] implementation. Used to service requests
-    methods: Arc<HashMap<&'static str, MethodFn>>,
 }
 
-/// Used to construct a [Server].
-pub struct ServerBuilder {
-    methods: HashMap<&'static str, MethodFn>
+pub struct Context {
+    pub num: u64,
+    pub methods: HashMap<&'static str, &'static dyn RawMethod>
 }
 
-impl ServerBuilder {
-    pub fn new() -> ServerBuilder {
-        ServerBuilder { methods: HashMap::new() }
+impl Context {
+    pub fn init() -> Context {
+        Context {
+            num: 0,
+            methods: HashMap::new()
+        }
     }
 
-    /// Register a [Method] with the server
-    pub fn add<M: Method>(mut self, _: M) -> ServerBuilder {
-        self.methods.insert(M::NAME, M::call_bytes);
-        self
+    pub fn register_method<M: Method>(&mut self, method: &'static M) {
+        self.methods.insert(M::NAME, method);
     }
+}
 
-    /// Construct the [Server] object
-    pub async fn build(self, config: config::Server) -> anyhow::Result<Server> {
+impl Server {
+    // initialise the server with a given configuration
+    pub async fn init(config: config::Server) -> anyhow::Result<Server> {
         log::info!("initialising server with config: {config:#?}");
         let listener = net::TcpListener::bind(config.addr).await?;
         log::info!("listener bound to {}", config.addr);
         let files = Files::open(config.db)?;
 
-        Ok(Server { listener, files: Arc::new(files), methods: Arc::new(self.methods) })
-    }
-}
-
-pub struct Context(u64);
-
-impl Server {
-    // initialise the server with a given configuration
-    pub async fn init(config: config::Server) -> anyhow::Result<Server> {
-        ServerBuilder::new()
-            // install method handlers we need
-            .add(methods::Get)
-            .add(methods::Insert)
-            .add(methods::GetListing)
-            .add(methods::Clear)
-            .add(methods::Delete)
-            .add(methods::Rollback)
-            .add(methods::GetNode)
-            .add(methods::GetHistory)
-            .add(methods::GetCtx)
-            .add(methods::Increment)
-            .build(config).await
+        Ok(Server { listener, files: Arc::new(files) })
     }
 
     pub async fn run(&self) -> anyhow::Result<()> {
@@ -81,10 +61,20 @@ impl Server {
 
             // clone resources for connection handler
             let files = self.files.clone();
-            let methods = self.methods.clone();
 
             tokio::spawn(async move {
-                let mut ctx = Context(0);
+                let mut ctx = Context::init();
+
+                ctx.register_method(&methods::Get);
+                ctx.register_method(&methods::Insert);
+                ctx.register_method(&methods::GetListing);
+                ctx.register_method(&methods::Clear);
+                ctx.register_method(&methods::Delete);
+                ctx.register_method(&methods::Rollback);
+                ctx.register_method(&methods::GetNode);
+                ctx.register_method(&methods::GetHistory);
+                ctx.register_method(&methods::GetCtx);
+                ctx.register_method(&methods::Increment);
 
                 // wrap operation in async block; lets us catch errors
                 let fut = async move {
@@ -92,10 +82,10 @@ impl Server {
                         // read next packet from client
                         if let Some(request) = proto::read_packet(&mut stream).await? {
                             // dispatch request to respective method handler
-                            let handler = methods.get(&request.method[..])
+                            let handler = ctx.methods.get(&request.method[..])
                                 .ok_or(Error::InvalidMethod(request.method))?;
 
-                            let response = handler(&files, &mut ctx, request.data);
+                            let response = handler.call_bytes(&files, &mut ctx, request.data);
 
                             // send response to client
                             match response {

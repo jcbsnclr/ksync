@@ -217,7 +217,7 @@ impl Method for Increment {
     const NAME: &'static str = "INCREMENT";
 
     fn call<'a>(_: &Files, ctx: &mut Context, _: Self::Input<'a>) -> anyhow::Result<Self::Output> {
-        ctx.0 += 1;
+        ctx.num += 1;
 
         Ok(())
     }
@@ -232,6 +232,6 @@ impl Method for GetCtx {
     const NAME: &'static str = "GET_CTX";
 
     fn call<'a>(_: &Files, ctx: &mut Context, _: Self::Input<'a>) -> anyhow::Result<Self::Output> {
-        Ok(ctx.0)
+        Ok(ctx.num)
     }
 }

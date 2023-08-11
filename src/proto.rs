@@ -126,28 +126,32 @@ pub async fn write_packet<W: AsyncWriteExt + Unpin, T: Serialize>(writer: &mut W
     Ok(())
 }
 
-/// A type signature representing an implementation of [Method::call_bytes]
-pub type MethodFn = fn(&Files, &mut Context, bytes: Vec<u8>) -> anyhow::Result<Vec<u8>>;
-
 /// The [Method] trait is used to implement different methods of the protocol (e.g. `GET`, `INSERT`, etc.)
-pub trait Method {
+pub trait Method: Send + Sync + 'static {
     type Input<'a>: Serialize + Deserialize<'a>;
     type Output: Serialize + DeserializeOwned;
 
     /// UTF-8 string identifier of the method. Used to dynamically dispatch a request to it's responder
     const NAME: &'static str;
 
+    /// The functionality to be invoked when a method is called
+    fn call<'a>(files: &Files, ctx: &mut Context, input: Self::Input<'a>) -> anyhow::Result<Self::Output>;
+}
+
+pub trait RawMethod: Send + Sync {
     /// A wrapper over [Method::call] that deserialises input, and serialises output, automatically
-    fn call_bytes(files: &Files, ctx: &mut Context, bytes: Vec<u8>) -> anyhow::Result<Vec<u8>> {
+    fn call_bytes(&self, files: &Files, ctx: &mut Context, bytes: Vec<u8>) -> anyhow::Result<Vec<u8>>;
+}
+
+impl<T> RawMethod for T
+where T: Method {
+    fn call_bytes(&self, files: &Files, ctx: &mut Context, bytes: Vec<u8>) -> anyhow::Result<Vec<u8>> {
         let input = bincode::deserialize(&bytes)?;
         let output = Self::call(files, ctx, input)?;
         let output_bytes = bincode::serialize(&output)?;
 
         Ok(output_bytes)
     }
-
-    /// The functionality to be invoked when a method is called
-    fn call<'a>(files: &Files, ctx: &mut Context, input: Self::Input<'a>) -> anyhow::Result<Self::Output>;
 }
 
 /// Invokes a given [Method] on a server
