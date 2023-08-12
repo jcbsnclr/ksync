@@ -8,6 +8,7 @@ mod util;
 mod sync;
 mod client;
 mod batch;
+mod admin;
 
 use std::{path::PathBuf, net::SocketAddr};
 
@@ -47,6 +48,12 @@ enum Command {
         addr: SocketAddr,
         #[command(subcommand)]
         method: batch::Method
+    },
+
+    Admin {
+        db: PathBuf,
+        #[command(subcommand)]
+        command: admin::Command
     }
 }
 
@@ -114,6 +121,11 @@ async fn main() -> anyhow::Result<()> {
         Command::Cli { addr, method } => {
             let mut client = client::Client::connect(addr).await?;
             batch::run_method(&mut client, method).await?;
+        },
+
+        Command::Admin { db, command } => {
+            let files = files::Files::open(db)?;
+            admin::admin_cli(&files, command)?;
         }
     }
 

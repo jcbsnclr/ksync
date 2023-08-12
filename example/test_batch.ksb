@@ -1,3 +1,2 @@
 identify
-insert -t /files/test.txt -f example/test.txt
-identify
+get -t out.txt -f /files/test.txt

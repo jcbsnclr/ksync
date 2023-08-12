@@ -18,20 +18,16 @@ impl Method for Get {
 
         log::info!("client {addr} retrieving file {path}");
 
-        let object = files.with_root("root", Revision::FromLatest(0), |node| {
-            if let Some(&mut object) = node.traverse(path)?.and_then(|n| n.file()) {
-                Ok(object)
-            } else {
-                let err: io::Error = io::ErrorKind::InvalidInput.into();
-                Err(err.into())
-            }
-        })?;
+        let data = files.get(path, Revision::FromLatest(0))?;
 
-        log::info!("got object {}; returning to {addr}", object.hex());
+        if let Some(data) = data {
+            let data = &data[..];
 
-        let data = files.get(&object)?;
-
-        Ok((&data[..]).to_owned())
+            Ok(data.to_owned())
+        } else {
+            let err: io::Error = io::ErrorKind::NotFound.into();
+            Err(err.into())
+        }
     }
 }
 
@@ -49,16 +45,7 @@ impl Method for Insert {
 
         log::info!("client {addr} storing file {path}");
         
-        let (parent, _) = path.parent_child();
-
-        let object = files.create_object(&data)?;
-
-        files.with_root_mut("root", |node| {
-            node.make_dir_recursive(parent)?;
-            node.insert(path, object)?;
-            Ok(())
-        })?;
-        log::info!("stored {path} (object {})", object.hex());
+        files.insert(path, &data)?;
 
         Ok(())
     }
@@ -77,11 +64,7 @@ impl Method for Delete {
 
         log::info!("client {addr} deleting file {path}");
 
-        files.with_root_mut("root", |node| {
-            node.delete(path)?;
-
-            Ok(())
-        })?;
+        files.delete(path)?;
 
         Ok(())
     }
@@ -119,15 +102,7 @@ impl Method for Rollback {
 
         log::info!("client {addr} rolling back filesystem to revision {:?}", revision);
 
-        // the node to roll back to
-        let mut old_root = files.get_root("root", revision)?;
-        // the current node to merge with the root
-        let new_root = files.get_root("root", Revision::FromLatest(0))?;
-
-        // merge nodes to mark any files that don't exist in the old node as deleted
-        old_root.merge(new_root)?;
-
-        files.set_root("root", old_root)?;
+        files.rollback(revision)?;
 
         Ok(())
     }
@@ -146,17 +121,12 @@ impl Method for GetNode {
 
         log::info!("client {addr} requested node {} @ {:?}", path.as_str(), revision);
 
-        files.with_root("root", revision, |node| {
-            // find the node at the given path
-            if let Some(node) = node.traverse(path)? {
-                // node found; return
-                Ok(node.clone())
-            } else {
-                // note not found; error
-                let err: io::Error = io::ErrorKind::NotFound.into();
-                Err(err.into())
-            }
-        })
+        if let Some(node) = files.get_node(path, revision)? {
+            Ok(node)
+        } else {
+            let err: io::Error = io::ErrorKind::NotFound.into();
+            Err(err.into())
+        }
     }
 }
 
@@ -173,7 +143,7 @@ impl Method for GetHistory {
 
         log::info!("client {addr} requested history for root 'root'");
 
-        let history = files.get_root_history("root")?;
+        let history = files.get_history()?;
 
         Ok(history)
     }

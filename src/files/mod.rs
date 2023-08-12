@@ -3,6 +3,7 @@ pub mod keyring;
 
 pub use node::*;
 pub use keyring::*;
+use sled::IVec;
 
 use std::time::SystemTime;
 use std::io;
@@ -237,6 +238,7 @@ pub enum Revision {
     AsOfTime(u128)
 }
 
+// filesystem internals
 impl Files {
     /// Opens a [Files] database from a given path, and initialises it
     // TODO: stop re-initialising the database on each open
@@ -254,16 +256,16 @@ impl Files {
         files.roots.set_merge_operator(root_merge);
 
         // if root node does not exist, create it 
-        if files.roots.get("root")?.is_none() {
+        if files.roots.get("fs")?.is_none() {
             let dir = Node::new_dir();
             let object = files.serialize(&dir)?;
-            files.roots.merge("root", object.hash())?;
+            files.roots.merge("fs", object.hash())?;
         }
 
         Ok(files)
     }
 
-    pub fn get_root_history(&self, root: &str) -> anyhow::Result<RootHistory> {
+    fn get_root_history(&self, root: &str) -> anyhow::Result<RootHistory> {
         log::info!("loading root '{root}' history");
         let history = self.roots.get(root)?
             .ok_or(io::Error::new(io::ErrorKind::NotFound, "root not found"))?;
@@ -274,7 +276,7 @@ impl Files {
         Ok(history)
     }
 
-    pub fn get_root(&self, root: &str, revision: Revision) -> anyhow::Result<Node> {
+    fn get_root(&self, root: &str, revision: Revision) -> anyhow::Result<Node> {
         // load root node from database
         let history = self.get_root_history(root)?;
 
@@ -297,7 +299,7 @@ impl Files {
         Ok(node)
     }
 
-    pub fn set_root(&self, root: &str, node: Node) -> anyhow::Result<()> {
+    fn set_root(&self, root: &str, node: Node) -> anyhow::Result<()> {
         let object = self.serialize(&node)?;
         self.roots.merge(root, object.hash())?;
 
@@ -307,7 +309,7 @@ impl Files {
     }
 
     /// Perform operations on a given `root`
-    pub fn with_root_mut<T>(&self, root: &str, op: impl Fn(&mut Node) -> anyhow::Result<T>) -> anyhow::Result<T> {
+    fn with_root_mut<T>(&self, root: &str, op: impl Fn(&mut Node) -> anyhow::Result<T>) -> anyhow::Result<T> {
         log::info!("mutating root '{root}'");
 
         // we can only mutate the latest revision of the filesystem.
@@ -322,7 +324,7 @@ impl Files {
         Ok(result)
     }
 
-    pub fn with_root<T>(&self, root: &str, revision: Revision, op: impl Fn(&mut Node) -> anyhow::Result<T>) -> anyhow::Result<T> {
+    fn with_root<T>(&self, root: &str, revision: Revision, op: impl Fn(&mut Node) -> anyhow::Result<T>) -> anyhow::Result<T> {
         log::info!("accessing root '{root}'");
 
         let mut node = self.get_root(root, revision)?;
@@ -333,22 +335,8 @@ impl Files {
         Ok(result)
     }
 
-    /// Clears the files database
-    pub fn clear(&self) -> anyhow::Result<()> {
-        log::info!("clearing database");
-        self.objects.clear()?;
-        self.roots.clear()?;
-
-        // create a new root node
-        let dir = Node::new_dir();
-        let object = self.serialize(&dir)?;
-        self.roots.merge("root", object.hash())?;
-
-        Ok(())
-    }
-
     /// Create a new [Object] containing `data`, referenced by it's hash
-    pub fn create_object(&self, data: impl AsRef<[u8]>) -> sled::Result<Object> {
+    fn create_object(&self, data: impl AsRef<[u8]>) -> sled::Result<Object> {
         // generate a hash of data
         let mut hasher = sha2::Sha256::new();
         hasher.update(data.as_ref());
@@ -363,21 +351,117 @@ impl Files {
     }
 
     /// Serialize `value`, and store it as an [Object]
-    pub fn serialize<T: Serialize>(&self, value: &T) -> anyhow::Result<Object> {
+    fn serialize<T: Serialize>(&self, value: &T) -> anyhow::Result<Object> {
         let data = bincode::serialize(value)?;
         
         Ok(self.create_object(&data)?)
     }
 
     /// Load an [Object] from the database
-    pub fn get(&self, object: &Object) -> sled::Result<sled::IVec> {
+    fn load(&self, object: &Object) -> sled::Result<sled::IVec> {
         self.objects.get(&object.hash()).map(|obj| obj.unwrap())
     }
 
     /// Load an [Object] and deserialize it 
-    pub fn deserialize<T: DeserializeOwned>(&self, object: &Object) -> anyhow::Result<T> {
-        let data = self.get(object)?.to_vec();
+    fn deserialize<T: DeserializeOwned>(&self, object: &Object) -> anyhow::Result<T> {
+        let data = self.load(object)?.to_vec();
         let value = bincode::deserialize(&data)?;
         Ok(value)
+    }
+}
+
+// public helpers
+impl Files {
+    /// Clears the files database
+    pub fn clear(&self) -> anyhow::Result<()> {
+        log::info!("clearing database");
+        self.objects.clear()?;
+        self.roots.clear()?;
+
+        // create a new root node
+        let dir = Node::new_dir();
+        let object = self.serialize(&dir)?;
+        self.roots.merge("fs", object.hash())?;
+
+        Ok(())
+    }
+
+    pub fn insert(&self, path: Path, data: &[u8]) -> anyhow::Result<()> {
+        log::debug!("inserting to file {path}");
+
+        let object = self.create_object(data)?;
+        let (parent, _) = path.parent_child();
+
+        self.with_root_mut("fs", |node| {
+            node.make_dir_recursive(parent)?;
+            node.insert(path, object)?;
+            Ok(())
+        })?;
+
+        log::debug!("inserted file '{path}' (object {})", object.hex());
+
+        Ok(())
+    }
+
+    pub fn get(&self, path: Path, revision: Revision) -> anyhow::Result<Option<IVec>> {
+        log::debug!("retrieving file {path}");
+
+        let object = self.with_root("fs", revision, |node| {
+            let node = node.traverse(path)?;
+            let object = node.and_then(|node| node.file());
+
+            Ok(object.cloned())
+        })?;
+
+        if let Some(object) = object {
+            log::debug!("got object {} for file '{path}'", object.hex());
+
+            Ok(Some(self.load(&object)?))
+        } else {
+            log::error!("file '{path}' not found");
+            Ok(None)
+        }
+    }
+
+    pub fn delete(&self, path: Path) -> anyhow::Result<()> {
+        log::debug!("deleting file '{path}'");
+
+        self.with_root_mut("fs", |node| {
+            node.delete(path)?;
+
+            Ok(())
+        })?;
+
+        Ok(())
+    }
+
+    pub fn rollback(&self, revision: Revision) -> anyhow::Result<()> {
+        // the node to roll back to
+        let mut old_root = self.get_root("fs", revision)?;
+        // the current node to merge with the root
+        let new_root = self.get_root("fs", Revision::FromLatest(0))?;
+
+        // merge nodes to mark any files that don't exist in the old node as deleted
+        old_root.merge(new_root)?;
+
+        self.set_root("fs", old_root)?;
+
+        Ok(())
+    }
+
+    pub fn get_node(&self, path: Path, revision: Revision) -> anyhow::Result<Option<Node>> {
+        log::debug!("retrieving node '{path}'");
+
+        let node = self.with_root("fs", revision, |node| {
+            let node = node.traverse(path)?;
+
+            Ok(node.cloned())
+        })?;
+
+        Ok(node)
+    }
+
+    pub fn get_history(&self) -> anyhow::Result<RootHistory> {
+        self.get_root_history("fs")
     }
 }
