@@ -24,7 +24,8 @@ pub struct Server {
 pub struct Sync {
     pub remote: SocketAddr,
     pub point: SyncPoint,
-    pub resync_time: u64
+    pub resync_time: u64,
+    pub key: PathBuf
 }
 
 #[derive(Deserialize, Debug)]

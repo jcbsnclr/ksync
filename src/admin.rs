@@ -1,9 +1,14 @@
 use chrono::TimeZone;
 use clap::Parser;
 
-use std::io::{self, Read, Write};
+use ring::rand::SystemRandom;
+use ring::signature::Ed25519KeyPair;
+use serde::{Deserialize, Serialize};
 
-use crate::files::{Files, Path, Revision};
+use std::io::{self, Read, Write};
+use std::path::PathBuf;
+
+use crate::files::{Files, Path, Revision, crypto};
 
 #[derive(Parser)]
 pub enum Command {
@@ -19,7 +24,58 @@ pub enum Command {
         path: String
     },
 
+    GenPair {
+        out: PathBuf
+    },
+
+    SignKey {
+        #[arg(short, long)]
+        with: PathBuf,
+        #[arg(short, long)]
+        key: PathBuf
+    },
+
+    VerifyKey {
+        #[arg(short, long)]
+        with: PathBuf,
+        #[arg(short, long)]
+        key: PathBuf
+    },
+
+    SetAdmin {
+        key: PathBuf
+    },
+
+    SetServer {
+        key: PathBuf
+    },
+
+    Trust {
+        key: PathBuf
+    },
+
+    PubKey {
+        #[arg(short, long)]
+        key: PathBuf,
+        #[arg(short, long)]
+        out: PathBuf
+    },
+
+    DbgKey {
+        key: PathBuf
+    },
+
     Clear
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Identity {
+    identifier: String
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct KeyGen {
+    identity: Identity
 }
 
 pub fn admin_cli(files: &Files, command: Command) -> anyhow::Result<()> {
@@ -28,6 +84,101 @@ pub fn admin_cli(files: &Files, command: Command) -> anyhow::Result<()> {
             files.clear()?;
             eprintln!("database cleared");
         },
+
+        Command::GenPair { out } => {
+            let editor = std::env::var("EDITOR")?;
+            let tmp = tempfile::NamedTempFile::new()?;
+
+            let initial_data = toml::to_string(&KeyGen {
+                identity: Identity { identifier: "test key".to_string() }
+            })?;
+
+            std::fs::write(tmp.path(), &initial_data)?;
+
+            std::process::Command::new(&editor)
+                .arg(tmp.path())
+                .spawn()?
+                .wait()?;
+
+            let data = std::fs::read_to_string(tmp.path())?;
+
+            let data: KeyGen = toml::from_str(&data)?;
+
+            let key = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+
+            let data = bincode::serialize(&crypto::Key::from_key_pair(key.as_ref(), &data.identity.identifier).unwrap())?;
+
+            std::fs::write(out, data)?;
+        },
+
+        Command::SignKey { with, key } => {
+            let with_data = std::fs::read(with)?;
+            let key_data = std::fs::read(&key)?;
+
+            let withk: crypto::Key = bincode::deserialize(&with_data)?;
+            let mut keyk: crypto::Key = bincode::deserialize(&key_data)?;
+
+            keyk.sign(&withk)?;
+
+            let data = bincode::serialize(&keyk)?;
+
+            std::fs::write(key, data)?;
+        },
+
+        Command::VerifyKey { with, key } => {
+            let with_data = std::fs::read(with)?;
+            let key_data = std::fs::read(&key)?;
+
+            let withk: crypto::Key = bincode::deserialize(&with_data)?;
+            let keyk: crypto::Key = bincode::deserialize(&key_data)?;
+
+            if keyk.verify(&withk)? {
+                eprintln!("key verified");
+            } else {
+                eprintln!("error verifying key");
+            }
+        },
+
+        Command::SetAdmin { key } => {
+            let key_data = std::fs::read(key)?;
+            let key: crypto::Key = bincode::deserialize(&key_data)?;
+
+            files.set_admin_key(key)?;
+        },
+
+        Command::SetServer { key } => {
+            let key_data = std::fs::read(key)?;
+            let key: crypto::Key = bincode::deserialize(&key_data)?;
+
+            files.set_server_key(key)?;
+        },
+
+        Command::DbgKey { key } => {
+            let key_data = std::fs::read(key)?;
+
+            let keyk: crypto::Key = bincode::deserialize(&key_data)?;
+
+            println!("{keyk}");
+        },
+
+        Command::PubKey { key, out } => {
+            let key_data = std::fs::read(key)?;
+            let key: crypto::Key = bincode::deserialize(&key_data)?;
+
+            let pub_key = key.pub_key();
+            let pub_key = bincode::serialize(&pub_key)?;
+
+            std::fs::write(out, pub_key)?;
+        },
+
+        Command::Trust { key } => {
+            let key_data = std::fs::read(key)?;
+            let key: crypto::Key = bincode::deserialize(&key_data)?;
+
+            let pub_key = key.pub_key();
+
+            files.trust_client(pub_key)?;
+        }
 
         Command::Get { path } => {
             let path = Path::new(&path)?;

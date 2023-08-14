@@ -1,2 +1,2 @@
-identify
+identify -k example/client.key.pub
 get -t out.txt -f /files/test.txt

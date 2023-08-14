@@ -59,7 +59,10 @@ impl SyncClient {
             }
         });
 
-        client.invoke(methods::auth::Identify, ()).await?;
+        let key = tokio::fs::read(config.key).await?;
+        let key = bincode::deserialize(&key)?;
+
+        client.invoke(methods::auth::Identify, key).await?;
 
         Ok(SyncClient { _watcher: watcher, event_queue, dir, client })
     }

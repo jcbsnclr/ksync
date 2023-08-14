@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use crate::client::Client;
 use crate::server::methods;
-use crate::files::{self, Revision};
+use crate::files::{self, Revision, crypto};
 
 #[derive(Parser)]
 pub enum RollbackCommand {
@@ -22,7 +22,10 @@ pub enum RollbackCommand {
 
 #[derive(Parser)]
 pub enum Method {
-    Identify,
+    Identify {
+        #[arg(short, long)]
+        key: PathBuf
+    },
 
     Get {
         #[arg(short, long)]
@@ -60,8 +63,11 @@ pub enum Method {
 
 pub async fn run_method(client: &mut Client, method: Method) -> anyhow::Result<()> {
     match method {
-        Method::Identify => {
-            client.invoke(methods::auth::Identify, ()).await?;
+        Method::Identify { key } => {
+            let key = tokio::fs::read(&key).await?;
+            let key: crypto::Key = bincode::deserialize(&key)?;
+
+            client.invoke(methods::auth::Identify, key).await?;
         }
 
         Method::Get { to, from } => {

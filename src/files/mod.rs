@@ -1,8 +1,8 @@
 pub mod node;
-pub mod keyring;
+pub mod crypto;
 
 pub use node::*;
-pub use keyring::*;
+
 use sled::IVec;
 
 use std::time::SystemTime;
@@ -262,6 +262,19 @@ impl Files {
             files.roots.merge("fs", object.hash())?;
         }
 
+        if files.roots.get("keyring")?.is_none() {
+            let dir = Node::new_dir();
+            let object = files.serialize(&dir)?;
+            files.roots.merge("keyring", object.hash())?;
+
+            files.with_root_mut("keyring", |node| {
+                node.make_dir(Path::new("/self")?)?;
+                node.make_dir(Path::new("/trusted")?)?;
+
+                Ok(())
+            })?;
+        }
+
         Ok(files)
     }
 
@@ -368,6 +381,34 @@ impl Files {
         let value = bincode::deserialize(&data)?;
         Ok(value)
     }
+
+    fn set_key(&self, path: Path, key: crypto::Key) -> anyhow::Result<()> {
+        let object = self.serialize(&key)?;
+
+        self.with_root_mut("keyring", |node| {
+            node.insert(path, object)?;
+
+            Ok(())
+        })?;
+
+        Ok(())
+    }
+
+    fn get_key(&self, path: Path) -> anyhow::Result<crypto::Key> {
+        let object = self.with_root("keyring", Revision::FromLatest(0), |node| {
+            let node = node.traverse(path)?.and_then(|node| node.file());
+
+            Ok(node.cloned())
+        })?;
+
+        if let Some(object) = object {
+            let key = self.deserialize(&object)?;
+
+            Ok(key)
+        } else {
+            Err(io::Error::new(io::ErrorKind::NotFound, "").into())
+        }
+    }
 }
 
 // public helpers
@@ -464,4 +505,64 @@ impl Files {
     pub fn get_history(&self) -> anyhow::Result<RootHistory> {
         self.get_root_history("fs")
     }
-}
+
+    pub fn set_admin_key(&self, key: crypto::Key) -> anyhow::Result<()> {
+        let path = Path::new("/self/admin")?;
+
+        self.set_key(path, key)
+    }
+
+    pub fn get_admin_key(&self) -> anyhow::Result<crypto::Key> {
+        let path = Path::new("/self/admin")?;
+
+        self.get_key(path)
+    }
+
+    pub fn set_server_key(&self, key: crypto::Key) -> anyhow::Result<()> {
+        let path = Path::new("/self/server")?;
+
+        let admin_key = self.get_admin_key()?;
+
+        if key.verify(&admin_key)? {
+            self.set_key(path, key)?;
+            Ok(())
+        } else {
+            Err(io::Error::new(io::ErrorKind::InvalidData, "server key must be signed by admin key").into())
+        }
+    }
+
+    pub fn get_server_key(&self) -> anyhow::Result<crypto::Key> {
+        let path = Path::new("/self/server")?;
+
+        let key = self.get_key(path)?;
+        let admin_key = self.get_admin_key()?;
+
+        if key.verify(&admin_key)? {
+            Ok(key)
+        } else {
+            Err(io::Error::new(io::ErrorKind::InvalidData, "server key must be signed by admin key").into())
+        }
+    }
+
+    pub fn trust_client(&self, mut key: crypto::Key) -> anyhow::Result<()> {
+        let path = Path::new("/trusted/client")?;
+
+        let server_key = self.get_server_key()?;
+
+        key.sign(&server_key)?;
+
+        self.set_key(path, key)?;
+        Ok(())
+    }
+
+    pub fn verify_client(&self, key: &crypto::Key) -> anyhow::Result<bool> {
+        let server_key = self.get_server_key()?;
+
+        let client_key = self.get_key(Path::new("/trusted/client")?)?;
+
+        let is_verified = client_key.verify(&server_key)?;
+        let is_equal = client_key.pub_key().raw() == key.pub_key().raw();
+
+        Ok(is_verified && is_equal)
+    }
+} 

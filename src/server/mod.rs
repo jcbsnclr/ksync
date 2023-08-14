@@ -1,10 +1,11 @@
 pub mod methods;
 
-use tokio::net;
+use tokio::net::{self, TcpStream};
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::io;
 
 use crate::config;
 use crate::files::Files;
@@ -27,14 +28,16 @@ pub struct Server {
 
 pub struct Context {
     addr: SocketAddr,
-    methods: HashMap<&'static str, &'static dyn RawMethod>
+    methods: HashMap<&'static str, &'static dyn RawMethod>,
+    stream: TcpStream
 }
 
 impl Context {
-    pub fn init(addr: SocketAddr) -> Context {
+    fn init(addr: SocketAddr, stream: TcpStream) -> Context {
         Context {
             addr,
-            methods: HashMap::new()
+            stream,
+            methods: HashMap::new(),
         }
     }
 
@@ -59,7 +62,7 @@ impl Context {
         let handler = self.methods.get(&packet.method[..])
             .ok_or(Error::InvalidMethod(packet.method))?;
 
-        handler.call_bytes(&files, self, packet.data)
+        handler.call_bytes(files, self, packet.data)
     }
 }
 
@@ -74,25 +77,30 @@ impl Server {
         Ok(Server { listener, files: Arc::new(files) })
     }
 
+    async fn accept(&self) -> io::Result<Context> {
+        let (stream, addr) = self.listener.accept().await?;
+
+        let mut context = Context::init(addr, stream);
+
+        context.register(&methods::auth::Identify);
+
+        Ok(context)
+    }
+
     pub async fn run(&self) -> anyhow::Result<()> {
         loop {
             // accept connection from tcp listener
-            let (mut stream, addr) = self.listener.accept().await?;
-            log::info!("handling connection from {addr}");
+            let mut ctx = self.accept().await?;
+            let addr = ctx.addr();
 
-            // clone resources for connection handler
             let files = self.files.clone();
 
             tokio::spawn(async move {
-                let mut ctx = Context::init(addr);
-
-                ctx.register(&methods::auth::Identify);
-
                 // wrap operation in async block; lets us catch errors
                 let fut = async move {
                     loop { 
                         // read next packet from client
-                        if let Some(request) = proto::read_packet(&mut stream).await? {
+                        if let Some(request) = proto::read_packet(&mut ctx.stream).await? {
                             // dispatch request to respective method handler
                             let response = ctx.dispatch(&files, request);
 
@@ -103,11 +111,11 @@ impl Server {
                                     proto::Packet {
                                         method: "OK".to_string(),
                                         data
-                                    }.write(&mut stream).await?;
+                                    }.write(&mut ctx.stream).await?;
                                 },
 
                                 Err(e) => {
-                                    proto::write_packet(&mut stream, "ERR", e.to_string()).await?;
+                                    proto::write_packet(&mut ctx.stream, "ERR", e.to_string()).await?;
                                     return Err(e)
                                 }
                             }
