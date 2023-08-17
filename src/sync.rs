@@ -86,9 +86,11 @@ impl SyncClient {
             }
         });
 
+        // load the client key
         let key = tokio::fs::read(config.key).await?;
         let key = bincode::deserialize(&key)?;
 
+        // authenticate with the server using client key
         client.invoke(methods::auth::Identify, key).await?;
 
         Ok(SyncClient {
@@ -99,10 +101,12 @@ impl SyncClient {
         })
     }
 
+    /// Takes a path relative to the server and produces a local path into the sync point
     fn local_path(&self, path: Path) -> PathBuf {
         self.dir.join(&path.as_str()[1..])
     }
 
+    /// Takes a path within the sync point folder and produces a path relative to the server
     fn remote_path<'a>(&self, path: &std::path::Path) -> String {
         let new_path = path.strip_prefix(&self.dir).unwrap();
         let as_str = new_path.to_str().unwrap();
@@ -110,6 +114,7 @@ impl SyncClient {
         format!("/{}", as_str)
     }
 
+    /// Fetch a given file from the server
     async fn fetch_file(&mut self, path: Path<'_>) -> anyhow::Result<()> {
         let data = self.client.invoke(methods::fs::Get, path).await?;
 
@@ -123,6 +128,7 @@ impl SyncClient {
         Ok(())
     }
 
+    /// Update a given file on the server
     async fn upload_file(&mut self, path: Path<'_>) -> anyhow::Result<()> {
         let local_path = self.local_path(path);
 
@@ -135,6 +141,7 @@ impl SyncClient {
         Ok(())
     }
 
+    /// Delete a given file locally
     async fn delete_file(&mut self, path: Path<'_>) -> anyhow::Result<()> {
         let local_path = self.local_path(path);
 
@@ -147,18 +154,19 @@ impl SyncClient {
         Ok(())
     }
 
+    /// Compare the local and remote copy of a file, returning it's status relative to the server
     async fn compare(&mut self, root: &mut Node, path: Path<'_>) -> anyhow::Result<FileStatus> {
         let local_path = self.local_path(path);
 
-        let file = if let Some(mut file) = root.traverse(path)? {
+        // handle the file existing locally, but not on the server
+        // TODO: re-structure this to be prettier
+        if let Some(file) = root.traverse(path)? {
             if file.data().is_none() || file.dir().is_some() {
                 if !local_path.exists() {
                     return Ok(FileStatus::Same);
                 }
                 return Ok(FileStatus::Deleted);
             }
-
-            file.clone()
         } else {
             return Ok(FileStatus::Newer);
         };
@@ -209,6 +217,7 @@ impl SyncClient {
         }
     }
 
+    /// Bring an individual file in sync with the remote server
     async fn resync_file(&mut self, root: &mut Node, path: Path<'_>) -> anyhow::Result<()> {
         log::debug!("re-syncing file '{path}");
 
@@ -231,12 +240,15 @@ impl SyncClient {
         Ok(())
     }
 
+    /// The intial re-sync, used to catch any files that were added since the synchronisation client was last ran
     async fn init_resync(&mut self) -> anyhow::Result<()> {
         log::info!("perfoming initial re-sync");
 
+        // get an iterator over the files in the sync folder
         let dir_str = self.dir.to_str().unwrap();
         let files = glob::glob(&format!("{}/**/*", dir_str))?;
 
+        // retrieve the remote filesystem structure
         let mut listing = self
             .client
             .invoke(
@@ -249,18 +261,21 @@ impl SyncClient {
             let entry = entry?;
 
             if !entry.is_file() {
+                // we only want to process files; empty folders will not be synced to the server, and likewise, empty folders on the server will not be created on the client
                 continue;
             }
 
             let path = self.remote_path(entry.as_path());
             let path = Path::new(&path)?;
 
+            // resync the file
             self.resync_file(&mut listing, path).await?;
         }
 
         Ok(())
     }
 
+    /// Re-synchronise local sync folder with remote files
     async fn resync(&mut self) -> anyhow::Result<()> {
         log::info!("re-syncing with server");
         // retrieve server's file listing
@@ -276,6 +291,7 @@ impl SyncClient {
             let path = Path::new(&path)?;
 
             if node.file().is_some() || node.data().is_none() {
+                // the node is either a file, or has been deleted, so must be processed
                 self.resync_file(&mut listing, path).await?;
             }
         }
@@ -298,7 +314,7 @@ impl SyncClient {
                         continue;
                     }
 
-                    log::info!("got event {:#?}", event);
+                    log::trace!("got event {:#?}", event);
 
                     // create map of remote path -> metadata
                     let mut files = self

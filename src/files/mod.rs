@@ -493,7 +493,7 @@ impl Files {
 
     pub fn rollback(&self, revision: Revision) -> anyhow::Result<()> {
         // the node to roll back to
-        let mut old_root = self.get_root("fs", revision)?;
+        let old_root = self.get_root("fs", revision)?;
 
         self.set_root("fs", old_root)?;
 

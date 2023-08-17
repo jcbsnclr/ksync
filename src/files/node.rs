@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 
 use std::collections::HashMap;
 use std::io;
-use std::ops::DerefMut;
 use std::time::SystemTime;
 
 use crate::files::{Object, Path};

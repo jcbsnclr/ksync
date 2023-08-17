@@ -13,7 +13,6 @@ mod util;
 use std::{net::SocketAddr, path::PathBuf};
 
 use clap::Parser;
-use files::{Node, Object, Path};
 
 // fn print_files(files: &files::Files) -> sled::Result<()> {
 //     println!("objects:");
