@@ -8,22 +8,49 @@ use std::path::PathBuf;
 use std::time::Duration;
 use std::time::SystemTime;
 
+use crate::client::Client;
 use crate::config;
+use crate::files::Node;
 use crate::files::Path;
 use crate::files::Revision;
 use crate::server::methods;
-use crate::client::Client;
 
 enum SyncEvent {
     Notify(notify::Result<notify::Event>),
-    Resync
+    Resync,
+}
+
+enum FileStatus {
+    Newer,
+    Older,
+    Same,
+    NotPresent,
+    Deleted,
+}
+
+impl FileStatus {
+    fn needs_fetch(&self) -> bool {
+        matches!(self, FileStatus::Older)
+    }
+
+    fn needs_upload(&self) -> bool {
+        matches!(self, FileStatus::Newer)
+    }
+
+    fn not_present(&self) -> bool {
+        matches!(self, FileStatus::NotPresent)
+    }
+
+    fn is_deleted(&self) -> bool {
+        matches!(self, FileStatus::Deleted)
+    }
 }
 
 pub struct SyncClient {
     _watcher: notify::RecommendedWatcher,
     event_queue: mpsc::Receiver<SyncEvent>,
     dir: PathBuf,
-    client: Client
+    client: Client,
 }
 
 impl SyncClient {
@@ -36,10 +63,10 @@ impl SyncClient {
         // init_resync only re-syncs files that already exist locally; perform a proper re-sync afterwards to retrieve any files we missed
         let send_timer = send.clone();
 
-        // initialise the watcher; tell it to notify 
-        let mut watcher = notify::recommended_watcher(
-            move |e| send.blocking_send(SyncEvent::Notify(e)).unwrap()
-        )?;
+        // initialise the watcher; tell it to notify
+        let mut watcher = notify::recommended_watcher(move |e| {
+            send.blocking_send(SyncEvent::Notify(e)).unwrap()
+        })?;
 
         // get absolute path of the folder to sync and tell the watcher to watch it
         let dir = config.point.dir.canonicalize()?;
@@ -64,67 +91,192 @@ impl SyncClient {
 
         client.invoke(methods::auth::Identify, key).await?;
 
-        Ok(SyncClient { _watcher: watcher, event_queue, dir, client })
+        Ok(SyncClient {
+            _watcher: watcher,
+            event_queue,
+            dir,
+            client,
+        })
     }
 
-    /// Performs the initial re-sync between the client and server, ensuring both are up-to-date with any local/remote changes
-    async fn init_resync(&mut self) -> anyhow::Result<()> {
-        log::info!("performing initial resync from server");
+    fn local_path(&self, path: Path) -> PathBuf {
+        self.dir.join(&path.as_str()[1..])
+    }
 
-        // list all files in the folder to sync
-        let files = glob::glob(&format!("{}/**/*", self.dir.to_str().unwrap()))?;
+    fn remote_path<'a>(&self, path: &std::path::Path) -> String {
+        let new_path = path.strip_prefix(&self.dir).unwrap();
+        let as_str = new_path.to_str().unwrap();
 
-        log::info!("getting file listing from server");
+        format!("/{}", as_str)
+    }
 
-        // retrieve server's file listing
-        let mut listing = self.client.invoke(methods::fs::GetNode, (Path::new("/")?, Revision::FromLatest(0))).await?;
-        let listing = listing.file_list()?.as_map();
+    async fn fetch_file(&mut self, path: Path<'_>) -> anyhow::Result<()> {
+        let data = self.client.invoke(methods::fs::Get, path).await?;
 
-        for path in files.filter_map(Result::ok).filter(|p| p.is_file()) {
-            // work out the remote path of a local file
-            let remote_path = format!("/{}", path.strip_prefix(&self.dir)?.to_str().unwrap());
-            // let remote_path = Path::new(&remote_path)?;
+        let (parent, _) = path.parent_child();
+        let local_parent = self.local_path(parent);
+        let local_path = self.local_path(path);
 
-            log::info!("processing file {}", remote_path);
+        tokio::fs::create_dir_all(local_parent).await?;
+        tokio::fs::write(local_path, &data).await?;
 
-            // fetch the file's metadata
-            let metadata = tokio::fs::metadata(&path).await?;
+        Ok(())
+    }
 
-            // work out the hash of the file's contents
-            let contents = tokio::fs::read(&path).await?;
-            let mut hasher = sha2::Sha256::new();
-            hasher.update(&contents);
-            let hash: [u8; 32] = hasher.finalize().try_into().unwrap();
+    async fn upload_file(&mut self, path: Path<'_>) -> anyhow::Result<()> {
+        let local_path = self.local_path(path);
 
-            if let Some((object, timestamp)) = listing.get(&remote_path) {
-                if let Some(object) = object {
-                    let timestamp = SystemTime::UNIX_EPOCH + Duration::from_nanos(*timestamp as u64);
+        let data = tokio::fs::read(local_path).await?;
 
-                    // file exists on the remote server
-                    if object.hash() != &hash && timestamp > metadata.modified()? {
-                        // the local copy of the file is out of date
-                        log::info!("local copy of {remote_path} out of date; retrieving from server");
+        self.client
+            .invoke(methods::fs::Insert, (path, data))
+            .await?;
 
-                        // fetch server's copy and store to disk
-                        let data = self.client.invoke(methods::fs::Get, Path::new(&remote_path)?).await?;
-                        tokio::fs::write(path, &data).await?;
-                    } else if object.hash() != &hash && timestamp < metadata.modified()? {
-                        // the local copy of the file is newer than the remote copy
-                        log::info!("local copy of {remote_path} newer than remote copy; uploading to server");
+        Ok(())
+    }
 
-                        // upload local copy to server
-                        self.client.invoke(methods::fs::Insert, (Path::new(&remote_path)?, contents)).await?;
-                    }
+    async fn delete_file(&mut self, path: Path<'_>) -> anyhow::Result<()> {
+        let local_path = self.local_path(path);
+
+        if local_path.is_dir() {
+            tokio::fs::remove_dir_all(local_path).await?;
+        } else if local_path.is_file() {
+            tokio::fs::remove_file(local_path).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn compare(&mut self, root: &mut Node, path: Path<'_>) -> anyhow::Result<FileStatus> {
+        let local_path = self.local_path(path);
+
+        let file = if let Some(mut file) = root.traverse(path)? {
+            if file.data().is_none() || file.dir().is_some() {
+                if !local_path.exists() {
+                    return Ok(FileStatus::Same);
+                }
+                return Ok(FileStatus::Deleted);
+            }
+
+            file.clone()
+        } else {
+            return Ok(FileStatus::Newer);
+        };
+
+        if local_path.exists() {
+            // check if the file exists on the server
+            if let Some(file) = root.traverse(path)? {
+                if file.data().is_none() || file.dir().is_some() {
+                    return Ok(FileStatus::Deleted);
+                }
+
+                let object = file.file().unwrap();
+
+                // read the contents of the file and calculate SHA-256 hash
+                let data = tokio::fs::read(&local_path).await?;
+
+                let mut hasher = sha2::Sha256::new();
+                hasher.update(&data);
+                let local_hash = hasher.finalize();
+
+                // check if the hashes match
+                let hash_match = &local_hash[..] == object.hash();
+
+                if hash_match {
+                    // hashes match; nothing to be done
+                    Ok(FileStatus::Same)
                 } else {
-                    // file has been deleted
-                    tokio::fs::remove_file(path).await?;
+                    // get local and remote timestamps
+                    let local_metadata = tokio::fs::metadata(&local_path).await?;
+                    let local_time = local_metadata.modified()?;
+                    let remote_time =
+                        SystemTime::UNIX_EPOCH + Duration::from_nanos(file.timestamp() as u64);
+
+                    if local_time > remote_time {
+                        // local copy newer than remote copy
+                        Ok(FileStatus::Newer)
+                    } else {
+                        // local copy older than remote copy
+                        // NOTE: if the local and remote timestamps match, then we assume the server's copy is newer, due to latency between client -> server sync
+                        Ok(FileStatus::Older)
+                    }
                 }
             } else {
-                // local file does not exist on server
-                log::info!("local copy of {remote_path} does not exist in remote; uploading to server");
-                
-                // upload it to the server
-                self.client.invoke(methods::fs::Insert, (Path::new(&remote_path)?, contents)).await?;
+                Ok(FileStatus::Newer)
+            }
+        } else {
+            Ok(FileStatus::NotPresent)
+        }
+    }
+
+    async fn resync_file(&mut self, root: &mut Node, path: Path<'_>) -> anyhow::Result<()> {
+        log::debug!("re-syncing file '{path}");
+
+        let status = self.compare(root, path).await?;
+
+        if status.needs_fetch() {
+            log::info!("local copy of '{path}' is out of date; fetching from server");
+            self.fetch_file(path).await?;
+        } else if status.not_present() {
+            log::info!("local copy of '{path}' does not exist; fetching from server");
+            self.upload_file(path).await?;
+        } else if status.needs_upload() {
+            log::info!("remote copy of '{path}' is out of date; uploading to server");
+            self.upload_file(path).await?;
+        } else if status.is_deleted() {
+            log::info!("remote file '{path}' deleted; deleting local copy");
+            self.delete_file(path).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn init_resync(&mut self) -> anyhow::Result<()> {
+        log::info!("perfoming initial re-sync");
+
+        let dir_str = self.dir.to_str().unwrap();
+        let files = glob::glob(&format!("{}/**/*", dir_str))?;
+
+        let mut listing = self
+            .client
+            .invoke(
+                methods::fs::GetNode,
+                (Path::new("/")?, Revision::FromLatest(0)),
+            )
+            .await?;
+
+        for entry in files {
+            let entry = entry?;
+
+            if !entry.is_file() {
+                continue;
+            }
+
+            let path = self.remote_path(entry.as_path());
+            let path = Path::new(&path)?;
+
+            self.resync_file(&mut listing, path).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn resync(&mut self) -> anyhow::Result<()> {
+        log::info!("re-syncing with server");
+        // retrieve server's file listing
+        let mut listing = self
+            .client
+            .invoke(
+                methods::fs::GetNode,
+                (Path::new("/")?, Revision::FromLatest(0)),
+            )
+            .await?;
+
+        for (path, mut node) in listing.iter() {
+            let path = Path::new(&path)?;
+
+            if node.file().is_some() || node.data().is_none() {
+                self.resync_file(&mut listing, path).await?;
             }
         }
 
@@ -132,7 +284,6 @@ impl SyncClient {
     }
 
     pub async fn run(&mut self) -> anyhow::Result<()> {
-        // perform an initial resync to bring client/server up-to-date
         self.init_resync().await?;
 
         // receive messages from event queue
@@ -144,25 +295,36 @@ impl SyncClient {
 
                     // we only want to handle modification events rn
                     if !matches!(event.kind, EventKind::Modify(_)) {
-                        continue
+                        continue;
                     }
 
                     log::info!("got event {:#?}", event);
 
                     // create map of remote path -> metadata
-                    let mut files = self.client.invoke(methods::fs::GetNode, (Path::new("/")?, Revision::FromLatest(0))).await?;
+                    let mut files = self
+                        .client
+                        .invoke(
+                            methods::fs::GetNode,
+                            (Path::new("/")?, Revision::FromLatest(0)),
+                        )
+                        .await?;
                     let files = files.file_list()?.as_map();
-    
+
                     // iterate over files in event
                     for path in event.paths {
                         // make sure the event is for a file that is in the sync folder
                         if path.starts_with(&self.dir) && path.is_file() {
                             // strip sync folder from file's path to determine it's remote path
-                            let remote_path = format!("/{}", path.strip_prefix(&self.dir)?.to_str().unwrap());
+                            let remote_path =
+                                format!("/{}", path.strip_prefix(&self.dir)?.to_str().unwrap());
                             // let remote_path = Path::new(&remote_path)?;
-    
-                            log::info!("path: {}, remote_path: {}", path.to_string_lossy(), remote_path);
-    
+
+                            log::info!(
+                                "path: {}, remote_path: {}",
+                                path.to_string_lossy(),
+                                remote_path
+                            );
+
                             // read the contents of the file
                             let data = tokio::fs::read(&path).await?;
 
@@ -170,71 +332,29 @@ impl SyncClient {
                             let mut hasher = sha2::Sha256::new();
                             hasher.update(&data);
                             let hash: [u8; 32] = hasher.finalize().try_into().unwrap();
-            
+
                             // if the server's copy of the file's hash matches the local copy, do nothing
-                            if let Some((Some(object), _)) = files.get(&remote_path)  {
+                            if let Some((object, _)) = files.get(&remote_path) {
                                 if object.hash() == &hash {
-                                    continue
+                                    continue;
                                 }
                             }
 
                             // upload file to server
-                            log::info!("inserting file {} -> {remote_path}", path.to_string_lossy());
-                            self.client.invoke(methods::fs::Insert, (Path::new(&remote_path)?, data)).await?;
+                            log::info!(
+                                "inserting file {} -> {remote_path}",
+                                path.to_string_lossy()
+                            );
+                            self.client
+                                .invoke(methods::fs::Insert, (Path::new(&remote_path)?, data))
+                                .await?;
                         }
                     }
-                },
+                }
 
                 // periodic resync requested
                 SyncEvent::Resync => {
-                    log::info!("re-syncing with server");
-
-                    // get file listing from server and create iterator over it 
-                    let mut files = self.client.invoke(methods::fs::GetNode, (Path::new("/")?, Revision::FromLatest(0))).await?;
-                    let files = files.file_list()?;
-
-                    for (path, object, timestamp) in files {
-                        let remote_path = Path::new(&path)?;
-
-                        // strip first char from path, and join it to the sync folder, to get the file's location
-                        let local_path = self.dir.join(&path[1..]);
-
-                        log::info!("file: {}", local_path.to_string_lossy());
-
-                        if !local_path.exists() && !object.is_none() {
-                            // file does not exist locally; recursively make folders, and fetch from server
-                            tokio::fs::create_dir_all(local_path.parent().unwrap_or(&self.dir)).await?;
-                            let data = self.client.invoke(methods::fs::Get, remote_path).await?;
-                            tokio::fs::write(local_path, data).await?;
-                        } else if local_path.exists() {
-                            // file exists locally
-
-                            // fetch metadata
-                            let metadata = tokio::fs::metadata(&local_path).await?;
-
-                            // calculate the hash of the file's contents
-                            let contents = tokio::fs::read(&local_path).await?;
-                            let mut hasher = sha2::Sha256::new();
-                            hasher.update(&contents);
-                            let hash: [u8; 32] = hasher.finalize().try_into().unwrap();
-
-                            // work out timestamp based on UNIX epoch + offset
-                            let time = SystemTime::UNIX_EPOCH + Duration::from_nanos(timestamp as u64);
-
-                            // check if local and remote hashes match, and compare timestamps
-                            if let Some(object) = object {
-                                if &hash != object.hash() && time > metadata.modified()? {
-                                    // local file is out of date; fetch from server
-                                    let data = self.client.invoke(methods::fs::Get, remote_path).await?;
-                                    tokio::fs::write(&local_path, data).await?;
-                                }
-                            } else {
-                                // file has been deleted
-                                log::info!("file {remote_path} has been deleted; deleting local copy");
-                                tokio::fs::remove_file(&local_path).await?;
-                            }
-                        }
-                    }
+                    self.resync().await?;
                 }
             }
         }

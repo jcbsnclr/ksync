@@ -1,18 +1,19 @@
 #![feature(io_error_more, async_fn_in_trait)]
 
-mod files;
-mod server;
-mod config;
-mod proto;
-mod util;
-mod sync;
-mod client;
-mod batch;
 mod admin;
+mod batch;
+mod client;
+mod config;
+mod files;
+mod proto;
+mod server;
+mod sync;
+mod util;
 
-use std::{path::PathBuf, net::SocketAddr};
+use std::{net::SocketAddr, path::PathBuf};
 
 use clap::Parser;
+use files::{Node, Object, Path};
 
 // fn print_files(files: &files::Files) -> sled::Result<()> {
 //     println!("objects:");
@@ -36,31 +37,31 @@ use clap::Parser;
 enum Command {
     Daemon {
         #[arg(short, long)]
-        config: PathBuf
+        config: PathBuf,
     },
 
     RunBatch {
         addr: SocketAddr,
-        script: PathBuf
+        script: PathBuf,
     },
 
     Cli {
         addr: SocketAddr,
         #[command(subcommand)]
-        method: batch::Method
+        method: batch::Method,
     },
 
     Admin {
         db: PathBuf,
         #[command(subcommand)]
-        command: admin::Command
-    }
+        command: admin::Command,
+    },
 }
 
 #[derive(Parser)]
 struct Cmdline {
     #[command(subcommand)]
-    command: Command
+    command: Command,
 }
 
 #[tokio::main]
@@ -113,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
             // wait on tasks to finish before shutting down
             server_handle.await??;
             sync_handle.await??;
-        },
+        }
 
         // user has invoked the command line interface
         Command::RunBatch { addr, script } => batch(addr, script).await?,
@@ -121,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Cli { addr, method } => {
             let mut client = client::Client::connect(addr).await?;
             batch::run_method(&mut client, method).await?;
-        },
+        }
 
         Command::Admin { db, command } => {
             let files = files::Files::open(db)?;

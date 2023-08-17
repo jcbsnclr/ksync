@@ -1,9 +1,9 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 use std::collections::HashMap;
+use std::io;
 use std::ops::DerefMut;
 use std::time::SystemTime;
-use std::io;
 
 use crate::files::{Object, Path};
 
@@ -11,35 +11,25 @@ use crate::files::{Object, Path};
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum NodeData {
     Dir(HashMap<String, Node>),
-    File(Option<Object>)
+    File(Object),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Node {
-    data: NodeData,
-    timestamp: u128
-}
-
-impl std::ops::Deref for Node {
-    type Target = NodeData;
-
-    fn deref(&self) -> &Self::Target {
-        &self.data
-    }
-}
-
-impl DerefMut for Node {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.data
-    }
+    data: Option<NodeData>,
+    timestamp: u128,
 }
 
 impl Node {
     pub fn new(data: NodeData) -> Node {
         Node {
-            data,
-            timestamp: SystemTime::UNIX_EPOCH.elapsed().unwrap().as_nanos()
+            data: Some(data),
+            timestamp: SystemTime::UNIX_EPOCH.elapsed().unwrap().as_nanos(),
         }
+    }
+
+    pub fn data(&mut self) -> &mut Option<NodeData> {
+        &mut self.data
     }
 
     /// Create a new empty [Node::Dir]
@@ -47,14 +37,14 @@ impl Node {
         Node::new(NodeData::Dir(HashMap::new()))
     }
 
-    /// Create a new [Node::File] referencing a given [Object] 
+    /// Create a new [Node::File] referencing a given [Object]
     pub fn new_file(object: Object) -> Node {
-        Node::new(NodeData::File(Some(object)))
+        Node::new(NodeData::File(object))
     }
 
     /// Returns `Some(map)` if `self` is [Node::Dir]
     pub fn dir(&mut self) -> Option<&mut HashMap<String, Node>> {
-        if let NodeData::Dir(map) = &mut self.data {
+        if let Some(NodeData::Dir(map)) = &mut self.data {
             Some(map)
         } else {
             None
@@ -63,7 +53,7 @@ impl Node {
 
     /// Returns `Some(object)` if `self` is [Node::Dir]
     pub fn file(&mut self) -> Option<&mut Object> {
-        if let NodeData::File(Some(object)) = &mut self.data {
+        if let Some(NodeData::File(object)) = &mut self.data {
             Some(object)
         } else {
             None
@@ -112,7 +102,7 @@ impl Node {
                 current = if let Some(node) = current.get_child(&part)? {
                     node
                 } else {
-                    return Ok(None)
+                    return Ok(None);
                 }
             }
 
@@ -133,8 +123,7 @@ impl Node {
     /// Make a directory at a given path relative to `self`. Will error if `self` is not a [Node::Dir], or if the parent of a given folder does not exist.
     pub fn make_dir(&mut self, path: Path) -> io::Result<()> {
         if let (path, Some(name)) = path.parent_child() {
-            let node = self.traverse(path)?
-                .ok_or(io::ErrorKind::NotFound)?;
+            let node = self.traverse(path)?.ok_or(io::ErrorKind::NotFound)?;
 
             if !node.has_child(name)? {
                 node.insert_child(name, Node::new_dir())?;
@@ -159,8 +148,7 @@ impl Node {
     pub fn insert(&mut self, path: Path, object: Object) -> io::Result<()> {
         if let (path, Some(name)) = path.parent_child() {
             // self.make_dir_recursive(path)?;
-            let node = self.traverse(path)?
-                .ok_or(io::ErrorKind::NotFound)?;
+            let node = self.traverse(path)?.ok_or(io::ErrorKind::NotFound)?;
             node.insert_child(name, Node::new_file(object))?;
 
             Ok(())
@@ -171,38 +159,9 @@ impl Node {
     }
 
     pub fn delete(&mut self, path: Path) -> io::Result<()> {
-        let node = self.traverse(path)?
-            .ok_or(io::ErrorKind::NotFound)?;
+        let node = self.traverse(path)?.ok_or(io::ErrorKind::NotFound)?;
 
-        if let NodeData::File(object) = &mut node.data {
-            *object = None;
-            node.timestamp = SystemTime::UNIX_EPOCH.elapsed().unwrap().as_nanos();
-
-            Ok(())
-        } else {
-            let err: io::Error = io::ErrorKind::InvalidFilename.into();
-            Err(err)
-        }
-    }
-
-    pub fn merge(&mut self, mut rhs: Node) -> io::Result<()> {
-        let timestamp = SystemTime::UNIX_EPOCH.elapsed().unwrap().as_nanos();
-
-        for (path, ..) in rhs.file_list()? {
-            let path = Path::new(&path).unwrap();
-
-            let (parent, child) = path.parent_child();
-            let child = child.unwrap();
-
-            self.make_dir_recursive(parent)?;
-            let node = self.traverse(parent)?.unwrap();
-
-            if let Some(child) = node.get_child(child)? {
-                child.timestamp = timestamp;
-            } else {
-                node.insert_child(child, Node { data: NodeData::File(None), timestamp })?;
-            }
-        }
+        *node.data() = None;
 
         Ok(())
     }
@@ -211,28 +170,71 @@ impl Node {
         if self.dir().is_some() {
             Ok(FileList {
                 node_stack: vec![("/".to_string(), self)],
-                output_stack: vec![]
+                output_stack: vec![],
             })
         } else {
             Err(io::ErrorKind::NotADirectory.into())
+        }
+    }
+
+    pub fn iter(&self) -> NodeIter {
+        NodeIter {
+            node_stack: vec![("".to_owned(), self.clone())],
+            output_stack: vec![],
+        }
+    }
+}
+
+pub struct NodeIter {
+    node_stack: Vec<(String, Node)>,
+    output_stack: Vec<(String, Node)>,
+}
+
+impl Iterator for NodeIter {
+    type Item = (String, Node);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.output_stack.is_empty() {
+            self.output_stack.pop()
+        } else {
+            if let Some((path, mut node)) = self.node_stack.pop() {
+                if node.file().is_some() || node.data().is_none() {
+                    Some((path, node))
+                } else if let Some(map) = node.dir() {
+                    for (name, node) in map {
+                        self.node_stack
+                            .push((path.clone() + "/" + name, node.clone()));
+                    }
+
+                    if !path.is_empty() {
+                        Some((path, node))
+                    } else {
+                        Some(("/".to_owned(), node))
+                    }
+                } else {
+                    unreachable!()
+                }
+            } else {
+                None
+            }
         }
     }
 }
 
 pub struct FileList<'a> {
     node_stack: Vec<(String, &'a mut Node)>,
-    output_stack: Vec<(String, Option<Object>, u128)>,
+    output_stack: Vec<(String, Object, u128)>,
 }
 
 impl<'a> FileList<'a> {
-    pub fn as_map(self) -> HashMap<String, (Option<Object>, u128)> {
+    pub fn as_map(self) -> HashMap<String, (Object, u128)> {
         self.map(|(path, object, timestamp)| (path, (object, timestamp)))
             .collect()
     }
 }
 
 impl<'a> Iterator for FileList<'a> {
-    type Item = (String, Option<Object>, u128);
+    type Item = (String, Object, u128);
 
     fn next(&mut self) -> Option<Self::Item> {
         if !self.output_stack.is_empty() {
@@ -244,10 +246,18 @@ impl<'a> Iterator for FileList<'a> {
                 for (name, node) in node.children().unwrap() {
                     match node.data {
                         // if it is a dir, push to the node stack to be processed later
-                        NodeData::Dir(_) => self.node_stack.push((format!("{}{}/", path, name), node)),
+                        Some(NodeData::Dir(_)) => {
+                            self.node_stack.push((format!("{}{}/", path, name), node))
+                        }
 
-                        // if it is a file, push it to the output stack 
-                        NodeData::File(object) => self.output_stack.push((format!("{}{}", path, name), object.clone(), node.timestamp())),
+                        // if it is a file, push it to the output stack
+                        Some(NodeData::File(object)) => self.output_stack.push((
+                            format!("{}{}", path, name),
+                            object,
+                            node.timestamp(),
+                        )),
+
+                        None => continue,
                     }
                 }
 

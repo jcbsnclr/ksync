@@ -216,11 +216,7 @@ pub fn admin_cli(files: &Files, command: Command) -> anyhow::Result<()> {
                         for (path, object, timestamp) in node.file_list()? {
                             let timestamp = chrono::Local.timestamp_nanos(timestamp as i64);
 
-                            if let Some(object) = object {
-                                println!("  {path}: {} @ {}", object.hex(), timestamp.format("%v-%X"));
-                            } else {
-                                println!("  {path}: DELETED @ {}", timestamp.format("%v-%X"));
-                            }
+                            println!("  {path}: {} @ {}", object.hex(), timestamp.format("%v-%X"));
                         }
                     } else {
                         eprintln!("Error: '{path}' is not a directory");

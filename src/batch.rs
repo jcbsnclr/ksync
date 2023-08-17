@@ -128,11 +128,7 @@ pub async fn run_method(client: &mut Client, method: Method) -> anyhow::Result<(
             for (path, object, timestamp) in node.file_list()? {
                 let timestamp = chrono::Utc.timestamp_nanos(timestamp as i64);
 
-                if let Some(object) = object {
-                    println!("  {}: {} @{} UTC", path, object.hex(), timestamp.format("%v_%X"));
-                } else {
-                    println!("  {}: DELETED @ {}", path, timestamp);
-                }
+                println!("  {}: {} @{} UTC", path, object.hex(), timestamp.format("%v_%X"));
             }
         }
 
