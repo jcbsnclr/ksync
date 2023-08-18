@@ -2,12 +2,14 @@ use std::io;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use serde::{Serialize, Deserialize, de::DeserializeOwned};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::{files::Files, server::Context};
 
 /// Reads exactly `N` bytes from a given `reader`, and returns it as a static array
-pub async fn read_array<const N: usize, R: AsyncReadExt + Unpin>(reader: &mut R) -> io::Result<[u8; N]> {
+pub async fn read_array<const N: usize, R: AsyncReadExt + Unpin>(
+    reader: &mut R,
+) -> io::Result<[u8; N]> {
     let mut buf = [0; N];
 
     reader.read_exact(&mut buf).await?;
@@ -27,17 +29,23 @@ pub async fn read_data<R: AsyncReadExt + Unpin>(reader: &mut R) -> io::Result<Ve
     let len = read_int(reader).await? as usize;
 
     let mut buf = vec![0; len];
-    
+
     reader.read_exact(&mut buf).await?;
 
     Ok(buf)
 }
 
 /// Writes a static array of bytes to a given `writer`
-pub async fn write_array<const N: usize, W: AsyncWriteExt + Unpin>(writer: &mut W, array: [u8; N]) -> io::Result<()> {
+pub async fn write_array<const N: usize, W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    array: [u8; N],
+) -> io::Result<()> {
     match writer.write(&array).await? {
         n if n == N => Ok(()),
-        n => Err(io::Error::new(io::ErrorKind::UnexpectedEof, format!("tried to write {N} bytes, actually wrote {n}")))
+        n => Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!("tried to write {N} bytes, actually wrote {n}"),
+        )),
     }
 }
 
@@ -58,9 +66,8 @@ pub async fn write_data<W: AsyncWriteExt + Unpin>(writer: &mut W, data: &[u8]) -
 pub enum Error {
     #[error("invalid protocol '{proto:?}'")]
     InvalidProtocol { proto: [u8; 8] },
-
     // #[error("unknown method '{method}'")]
-    // UnknownMethod { method: String } 
+    // UnknownMethod { method: String }
 }
 
 /// A [Packet] represents a single message sent down the wire, from a client or server
@@ -69,7 +76,7 @@ pub struct Packet {
     /// The method to be invoked on the server
     pub method: String,
     /// `bincode`-encoded arguments to the method
-    pub data: Vec<u8>
+    pub data: Vec<u8>,
 }
 
 impl Packet {
@@ -94,7 +101,10 @@ pub async fn read_packet<R: AsyncReadExt + Unpin>(reader: &mut R) -> io::Result<
         Ok(proto) => {
             // check magic
             if &proto != b"ksync\0\0\0" {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, Error::InvalidProtocol { proto: proto }))
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    Error::InvalidProtocol { proto: proto },
+                ));
             }
 
             // read method string
@@ -104,24 +114,28 @@ pub async fn read_packet<R: AsyncReadExt + Unpin>(reader: &mut R) -> io::Result<
             // read data bytes
             let data = read_data(reader).await?;
 
-            Ok(Some(Packet {
-                method, data
-            }))
-        },
+            Ok(Some(Packet { method, data }))
+        }
 
         // eof
         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
 
-        Err(e) => Err(e)
+        Err(e) => Err(e),
     }
 }
 
 /// Writes an individual [Packet] to a given `writer` and flushes the stream. Automatically serializes `data` using `bincode`
-pub async fn write_packet<W: AsyncWriteExt + Unpin, T: Serialize>(writer: &mut W, method: &str, data: T) -> anyhow::Result<()> {
+pub async fn write_packet<W: AsyncWriteExt + Unpin, T: Serialize>(
+    writer: &mut W,
+    method: &str,
+    data: T,
+) -> anyhow::Result<()> {
     Packet {
         method: method.to_owned(),
-        data: bincode::serialize(&data)?
-    }.write(writer).await?;
+        data: bincode::serialize(&data)?,
+    }
+    .write(writer)
+    .await?;
 
     Ok(())
 }
@@ -136,21 +150,37 @@ pub trait Method: Send + Sync + 'static {
     const NAME: &'static str;
 
     /// The functionality to be invoked when a method is called
-    fn call<'a>(files: &Files, ctx: &mut Context, input: Self::Input<'a>) -> anyhow::Result<Self::Output>;
+    fn call<'a>(
+        files: &Files,
+        ctx: &mut Context,
+        input: Self::Input<'a>,
+    ) -> anyhow::Result<Self::Output>;
 }
 
 /// The [RawMethod] trait is wrapper over the [Method] trait that allows us to store [Method]s as trait objects.
 /// Unlike [Method], this trait sends raw bytes over the wire, and so is not generic.
 pub trait RawMethod: Send + Sync {
     /// A wrapper over [Method::call] that deserialises input, and serialises output, automatically
-    fn call_bytes(&self, files: &Files, ctx: &mut Context, bytes: Vec<u8>) -> anyhow::Result<Vec<u8>>;
+    fn call_bytes(
+        &self,
+        files: &Files,
+        ctx: &mut Context,
+        bytes: Vec<u8>,
+    ) -> anyhow::Result<Vec<u8>>;
 }
 
 // we implement RawMethod for all types that implement the Method trait, in order to be able to store them in a connection's
 // context
 impl<T> RawMethod for T
-where T: Method {
-    fn call_bytes(&self, files: &Files, ctx: &mut Context, bytes: Vec<u8>) -> anyhow::Result<Vec<u8>> {
+where
+    T: Method,
+{
+    fn call_bytes(
+        &self,
+        files: &Files,
+        ctx: &mut Context,
+        bytes: Vec<u8>,
+    ) -> anyhow::Result<Vec<u8>> {
         let input = bincode::deserialize(&bytes)?;
         let output = Self::call(files, ctx, input)?;
         let output_bytes = bincode::serialize(&output)?;
@@ -160,16 +190,19 @@ where T: Method {
 }
 
 /// Invokes a given [Method] on a server
-pub async fn invoke<'a, M: Method, S: AsyncReadExt + AsyncWriteExt + Unpin>(stream: &mut S, _method: M, input: M::Input<'a>) -> anyhow::Result<M::Output> {
+pub async fn invoke<'a, M: Method, S: AsyncReadExt + AsyncWriteExt + Unpin>(
+    stream: &mut S,
+    _method: M,
+    input: M::Input<'a>,
+) -> anyhow::Result<M::Output> {
     // send method call to server
     write_packet(stream, M::NAME, input).await?;
 
     // read response from server
-    let response = read_packet(stream).await?
-        .ok_or({
-            let err: io::Error = io::ErrorKind::UnexpectedEof.into();
-            err
-        })?;
+    let response = read_packet(stream).await?.ok_or({
+        let err: io::Error = io::ErrorKind::UnexpectedEof.into();
+        err
+    })?;
 
     // check for error
     if response.method == "OK" {

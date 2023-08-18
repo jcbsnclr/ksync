@@ -351,14 +351,14 @@ impl Files {
         &self,
         root: &str,
         revision: Revision,
-        op: impl Fn(&mut Node) -> anyhow::Result<T>,
+        op: impl Fn(&Node) -> anyhow::Result<T>,
     ) -> anyhow::Result<T> {
         log::info!("accessing root '{root}'");
 
-        let mut node = self.get_root(root, revision)?;
+        let node = self.get_root(root, revision)?;
 
         // perform operation on node
-        let result = op(&mut node)?;
+        let result = op(&node)?;
 
         Ok(result)
     }

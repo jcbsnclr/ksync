@@ -1,2 +1,4 @@
 identify -k example/client.key.pub
-delete -p /config
+insert -t /files/test.txt -f example/test.txt
+insert -t /config/server.toml -f example/server.toml
+insert -t /config/client.toml -f example/client.toml
