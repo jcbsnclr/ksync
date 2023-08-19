@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use serde::Deserialize;
 
@@ -8,7 +8,8 @@ use serde::Deserialize;
 pub struct Config {
     /// Server configuration
     pub server: Option<Server>,
-    pub sync: Option<Sync>
+    pub sync: Option<Sync>,
+    pub client: Option<Client>,
 }
 
 /// Server configuration
@@ -17,7 +18,7 @@ pub struct Server {
     /// The address to bind to
     pub addr: SocketAddr,
     /// Location of files database
-    pub db: PathBuf
+    pub db: PathBuf,
 }
 
 #[derive(Deserialize, Debug)]
@@ -25,10 +26,16 @@ pub struct Sync {
     pub remote: SocketAddr,
     pub point: SyncPoint,
     pub resync_time: u64,
-    pub key: PathBuf
+    pub key: PathBuf,
 }
 
 #[derive(Deserialize, Debug)]
 pub struct SyncPoint {
-    pub dir: PathBuf
+    pub dir: PathBuf,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct Client {
+    pub remote: SocketAddr,
+    pub key: PathBuf,
 }

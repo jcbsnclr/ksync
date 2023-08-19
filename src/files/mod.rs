@@ -13,7 +13,7 @@ use std::time::SystemTime;
 use chrono::TimeZone;
 use digest::Digest;
 
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
 
 use crate::util::fmt;
 
@@ -241,11 +241,68 @@ pub enum Revision {
     AsOfTime(u128),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("node '{path}' not found")]
+    NotFound { path: String },
+
+    #[error("node is not a directory")]
+    NotADirectory,
+
+    #[error("node is a directory")]
+    IsADirectory,
+
+    #[error("IO error: {error}")]
+    Io { error: io::Error },
+
+    #[error("database error: {error}")]
+    Database { error: sled::Error },
+
+    #[error("bincode error: {error}")]
+    Bincode { error: bincode::Error },
+
+    #[error("{error}")]
+    InvalidPath { error: InvalidPath },
+
+    #[error("authentication failed: {error}")]
+    Authentication { error: crypto::Error },
+}
+
+impl From<io::Error> for Error {
+    fn from(error: io::Error) -> Error {
+        Error::Io { error }
+    }
+}
+
+impl From<sled::Error> for Error {
+    fn from(error: sled::Error) -> Error {
+        Error::Database { error }
+    }
+}
+
+impl From<bincode::Error> for Error {
+    fn from(error: bincode::Error) -> Error {
+        Error::Bincode { error }
+    }
+}
+
+impl From<InvalidPath> for Error {
+    fn from(error: InvalidPath) -> Error {
+        Error::InvalidPath { error }
+    }
+}
+
+impl From<crypto::Error> for Error {
+    fn from(error: crypto::Error) -> Error {
+        Error::Authentication { error }
+    }
+}
+
 // filesystem internals
 impl Files {
     /// Opens a [Files] database from a given path, and initialises it
     // TODO: stop re-initialising the database on each open
-    pub fn open(path: impl AsRef<SysPath>) -> anyhow::Result<Files> {
+    pub fn open(path: impl AsRef<SysPath>) -> Result<Files, Error> {
         log::info!("opening db at {:?}", path.as_ref());
         let db = sled::open(path)?;
         log::info!("opening objects and roots trees");
@@ -279,7 +336,7 @@ impl Files {
         Ok(files)
     }
 
-    fn get_root_history(&self, root: &str) -> anyhow::Result<RootHistory> {
+    fn get_root_history(&self, root: &str) -> Result<RootHistory, Error> {
         log::info!("loading root '{root}' history");
         let history = self
             .roots
@@ -292,7 +349,7 @@ impl Files {
         Ok(history)
     }
 
-    fn get_root(&self, root: &str, revision: Revision) -> anyhow::Result<Node> {
+    fn get_root(&self, root: &str, revision: Revision) -> Result<Node, Error> {
         // load root node from database
         let history = self.get_root_history(root)?;
 
@@ -318,7 +375,7 @@ impl Files {
         Ok(node)
     }
 
-    fn set_root(&self, root: &str, node: Node) -> anyhow::Result<()> {
+    fn set_root(&self, root: &str, node: Node) -> Result<(), Error> {
         let object = self.serialize(&node)?;
         self.roots.merge(root, object.hash())?;
 
@@ -331,8 +388,8 @@ impl Files {
     fn with_root_mut<T>(
         &self,
         root: &str,
-        op: impl Fn(&mut Node) -> anyhow::Result<T>,
-    ) -> anyhow::Result<T> {
+        op: impl Fn(&mut Node) -> Result<T, Error>,
+    ) -> Result<T, Error> {
         log::info!("mutating root '{root}'");
 
         // we can only mutate the latest revision of the filesystem.
@@ -351,8 +408,8 @@ impl Files {
         &self,
         root: &str,
         revision: Revision,
-        op: impl Fn(&Node) -> anyhow::Result<T>,
-    ) -> anyhow::Result<T> {
+        op: impl Fn(&Node) -> Result<T, Error>,
+    ) -> Result<T, Error> {
         log::info!("accessing root '{root}'");
 
         let node = self.get_root(root, revision)?;
@@ -379,7 +436,7 @@ impl Files {
     }
 
     /// Serialize `value`, and store it as an [Object]
-    fn serialize<T: Serialize>(&self, value: &T) -> anyhow::Result<Object> {
+    fn serialize<T: Serialize>(&self, value: &T) -> Result<Object, Error> {
         let data = bincode::serialize(value)?;
 
         Ok(self.create_object(&data)?)
@@ -391,13 +448,13 @@ impl Files {
     }
 
     /// Load an [Object] and deserialize it
-    fn deserialize<T: DeserializeOwned>(&self, object: &Object) -> anyhow::Result<T> {
+    fn deserialize<T: DeserializeOwned>(&self, object: &Object) -> Result<T, Error> {
         let data = self.load(object)?.to_vec();
         let value = bincode::deserialize(&data)?;
         Ok(value)
     }
 
-    fn set_key(&self, path: Path, key: crypto::Key) -> anyhow::Result<()> {
+    fn set_key(&self, path: Path, key: crypto::Key) -> Result<(), Error> {
         let object = self.serialize(&key)?;
 
         self.with_root_mut("keyring", |node| {
@@ -409,7 +466,7 @@ impl Files {
         Ok(())
     }
 
-    fn get_key(&self, path: Path) -> anyhow::Result<crypto::Key> {
+    fn get_key(&self, path: Path) -> Result<crypto::Key, Error> {
         let object = self.with_root("keyring", Revision::FromLatest(0), |node| {
             let node = node.traverse(path)?.and_then(|node| node.file());
 
@@ -429,7 +486,7 @@ impl Files {
 // public helpers
 impl Files {
     /// Clears the files database
-    pub fn clear(&self) -> anyhow::Result<()> {
+    pub fn clear(&self) -> Result<(), Error> {
         log::info!("clearing database");
         self.objects.clear()?;
         self.roots.clear()?;
@@ -442,7 +499,7 @@ impl Files {
         Ok(())
     }
 
-    pub fn insert(&self, path: Path, data: &[u8]) -> anyhow::Result<()> {
+    pub fn insert(&self, path: Path, data: &[u8]) -> Result<(), Error> {
         log::debug!("inserting to file {path}");
 
         let object = self.create_object(data)?;
@@ -459,7 +516,7 @@ impl Files {
         Ok(())
     }
 
-    pub fn get(&self, path: Path, revision: Revision) -> anyhow::Result<Option<IVec>> {
+    pub fn get(&self, path: Path, revision: Revision) -> Result<Option<IVec>, Error> {
         log::debug!("retrieving file {path}");
 
         let object = self.with_root("fs", revision, |node| {
@@ -479,7 +536,7 @@ impl Files {
         }
     }
 
-    pub fn delete(&self, path: Path) -> anyhow::Result<()> {
+    pub fn delete(&self, path: Path) -> Result<(), Error> {
         log::debug!("deleting file '{path}'");
 
         self.with_root_mut("fs", |node| {
@@ -491,7 +548,7 @@ impl Files {
         Ok(())
     }
 
-    pub fn rollback(&self, revision: Revision) -> anyhow::Result<()> {
+    pub fn rollback(&self, revision: Revision) -> Result<(), Error> {
         // the node to roll back to
         let old_root = self.get_root("fs", revision)?;
 
@@ -500,7 +557,7 @@ impl Files {
         Ok(())
     }
 
-    pub fn get_node(&self, path: Path, revision: Revision) -> anyhow::Result<Option<Node>> {
+    pub fn get_node(&self, path: Path, revision: Revision) -> Result<Option<Node>, Error> {
         log::debug!("retrieving node '{path}'");
 
         let node = self.with_root("fs", revision, |node| {
@@ -512,23 +569,23 @@ impl Files {
         Ok(node)
     }
 
-    pub fn get_history(&self) -> anyhow::Result<RootHistory> {
+    pub fn get_history(&self) -> Result<RootHistory, Error> {
         self.get_root_history("fs")
     }
 
-    pub fn set_admin_key(&self, key: crypto::Key) -> anyhow::Result<()> {
+    pub fn set_admin_key(&self, key: crypto::Key) -> Result<(), Error> {
         let path = Path::new("/self/admin")?;
 
         self.set_key(path, key)
     }
 
-    pub fn get_admin_key(&self) -> anyhow::Result<crypto::Key> {
+    pub fn get_admin_key(&self) -> Result<crypto::Key, Error> {
         let path = Path::new("/self/admin")?;
 
         self.get_key(path)
     }
 
-    pub fn set_server_key(&self, key: crypto::Key) -> anyhow::Result<()> {
+    pub fn set_server_key(&self, key: crypto::Key) -> Result<(), Error> {
         let path = Path::new("/self/server")?;
 
         let admin_key = self.get_admin_key()?;
@@ -545,7 +602,7 @@ impl Files {
         }
     }
 
-    pub fn get_server_key(&self) -> anyhow::Result<crypto::Key> {
+    pub fn get_server_key(&self) -> Result<crypto::Key, Error> {
         let path = Path::new("/self/server")?;
 
         let key = self.get_key(path)?;
@@ -562,7 +619,7 @@ impl Files {
         }
     }
 
-    pub fn trust_client(&self, mut key: crypto::Key) -> anyhow::Result<()> {
+    pub fn trust_client(&self, mut key: crypto::Key) -> Result<(), Error> {
         let path = Path::new("/trusted/client")?;
 
         let server_key = self.get_server_key()?;
@@ -573,7 +630,7 @@ impl Files {
         Ok(())
     }
 
-    pub fn verify_client(&self, key: &crypto::Key) -> anyhow::Result<bool> {
+    pub fn verify_client(&self, key: &crypto::Key) -> Result<bool, Error> {
         let server_key = self.get_server_key()?;
 
         let client_key = self.get_key(Path::new("/trusted/client")?)?;

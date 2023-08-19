@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io;
 use std::time::SystemTime;
 
-use crate::files::{Object, Path};
+use crate::files::{Error, Object, Path};
 
 /// A [Node] represents a filesystem tree
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -79,49 +79,57 @@ impl Node {
         }
     }
 
+    pub fn is_dir(&self) -> bool {
+        self.dir().is_some()
+    }
+
+    pub fn is_file(&self) -> bool {
+        self.file().is_some()
+    }
+
     pub fn timestamp(&self) -> u128 {
         self.timestamp
     }
 
     /// Checks to see if a node contains a given child `name`
-    pub fn has_child(&mut self, name: &str) -> io::Result<bool> {
+    pub fn has_child(&mut self, name: &str) -> Result<bool, Error> {
         if let Some(map) = self.dir_mut() {
             Ok(map.contains_key(&name.to_string()))
         } else {
-            Err(io::ErrorKind::NotADirectory.into())
+            Err(Error::NotADirectory)
         }
     }
 
     /// Returns a mutable reference to a given child. Will error if `self` is not a directory
-    pub fn get_child_mut(&mut self, name: &str) -> io::Result<Option<&mut Node>> {
+    pub fn get_child_mut(&mut self, name: &str) -> Result<Option<&mut Node>, Error> {
         if let Some(map) = self.dir_mut() {
             Ok(map.get_mut(&name.to_string()))
         } else {
-            Err(io::ErrorKind::NotADirectory.into())
+            Err(Error::NotADirectory)
         }
     }
 
-    pub fn get_child(&self, name: &str) -> io::Result<Option<&Node>> {
+    pub fn get_child(&self, name: &str) -> Result<Option<&Node>, Error> {
         if let Some(map) = self.dir() {
             Ok(map.get(&name.to_string()))
         } else {
-            Err(io::ErrorKind::NotADirectory.into())
+            Err(Error::NotADirectory)
         }
     }
 
     /// Inserts a child into `self`. If `self` is not [Node::Dir], then return an error
-    pub fn insert_child(&mut self, name: &str, node: Node) -> io::Result<()> {
+    pub fn insert_child(&mut self, name: &str, node: Node) -> Result<(), Error> {
         if let Some(map) = self.dir_mut() {
             map.insert(name.to_string(), node);
 
             Ok(())
         } else {
-            Err(io::ErrorKind::NotADirectory.into())
+            Err(Error::NotADirectory)
         }
     }
 
     /// Returns a mutable reference to a [Node] at a given [Path], relative to `self`
-    pub fn traverse_mut(&mut self, path: Path) -> io::Result<Option<&mut Node>> {
+    pub fn traverse_mut(&mut self, path: Path) -> Result<Option<&mut Node>, Error> {
         if path.as_str() != "/" {
             let mut current = self;
 
@@ -139,7 +147,7 @@ impl Node {
         }
     }
 
-    pub fn traverse(&self, path: Path) -> io::Result<Option<&Node>> {
+    pub fn traverse(&self, path: Path) -> Result<Option<&Node>, Error> {
         if path.as_str() != "/" {
             let mut current = self;
 
@@ -157,18 +165,20 @@ impl Node {
         }
     }
 
-    pub fn children(&mut self) -> io::Result<impl Iterator<Item = (&String, &mut Node)>> {
+    pub fn children(&mut self) -> Result<impl Iterator<Item = (&String, &mut Node)>, Error> {
         if let Some(map) = self.dir_mut() {
             Ok(map.iter_mut())
         } else {
-            Err(io::ErrorKind::NotADirectory.into())
+            Err(Error::NotADirectory)
         }
     }
 
     /// Make a directory at a given path relative to `self`. Will error if `self` is not a [Node::Dir], or if the parent of a given folder does not exist.
-    pub fn make_dir(&mut self, path: Path) -> io::Result<()> {
+    pub fn make_dir(&mut self, path: Path) -> Result<(), Error> {
         if let (path, Some(name)) = path.parent_child() {
-            let node = self.traverse_mut(path)?.ok_or(io::ErrorKind::NotFound)?;
+            let node = self.traverse_mut(path)?.ok_or(Error::NotFound {
+                path: path.as_str().to_owned(),
+            })?;
 
             if !node.has_child(name)? {
                 node.insert_child(name, Node::new_dir())?;
@@ -179,7 +189,7 @@ impl Node {
     }
 
     /// Recursively make new directories from a given [Path]
-    pub fn make_dir_recursive(&mut self, path: Path) -> io::Result<()> {
+    pub fn make_dir_recursive(&mut self, path: Path) -> Result<(), Error> {
         for ancestor in path.ancestors().skip(1) {
             self.make_dir(ancestor)?;
         }
@@ -190,35 +200,45 @@ impl Node {
     }
 
     /// Creates a new [Node::File] at a given [Path], referencing an [Object]
-    pub fn insert(&mut self, path: Path, object: Object) -> io::Result<()> {
+    pub fn insert(&mut self, path: Path, object: Object) -> Result<(), Error> {
         if let (path, Some(name)) = path.parent_child() {
             // self.make_dir_recursive(path)?;
-            let node = self.traverse_mut(path)?.ok_or(io::ErrorKind::NotFound)?;
+            let node = self.traverse_mut(path)?.ok_or(Error::NotFound {
+                path: path.as_str().to_owned(),
+            })?;
+
+            if let Some(node) = node.get_child(name)? {
+                if node.is_dir() {
+                    return Err(Error::IsADirectory);
+                }
+            }
+
             node.insert_child(name, Node::new_file(object))?;
 
             Ok(())
         } else {
-            let err: io::Error = io::ErrorKind::InvalidFilename.into();
-            Err(err.into())
+            Err(Error::IsADirectory)
         }
     }
 
-    pub fn delete(&mut self, path: Path) -> io::Result<()> {
-        let node = self.traverse_mut(path)?.ok_or(io::ErrorKind::NotFound)?;
+    pub fn delete(&mut self, path: Path) -> Result<(), Error> {
+        let node = self.traverse_mut(path)?.ok_or(Error::NotFound {
+            path: path.as_str().to_owned(),
+        })?;
 
         *node.data_mut() = None;
 
         Ok(())
     }
 
-    pub fn file_list<'a>(&'a mut self) -> io::Result<FileList<'a>> {
+    pub fn file_list<'a>(&'a mut self) -> Result<FileList<'a>, Error> {
         if self.dir_mut().is_some() {
             Ok(FileList {
                 node_stack: vec![("/".to_string(), self)],
                 output_stack: vec![],
             })
         } else {
-            Err(io::ErrorKind::NotADirectory.into())
+            Err(Error::NotADirectory)
         }
     }
 
