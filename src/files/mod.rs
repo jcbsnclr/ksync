@@ -84,6 +84,7 @@ impl<'a> Path<'a> {
     /// ```
     pub fn new(str: &'a str) -> Result<Path<'a>, InvalidPath> {
         // count the number of double slashes in the path
+        // we skip the first empty string before the first slash
         let double_slashes = str.split('/').skip(1).filter(|&p| p == "").count();
 
         // check validity of path
@@ -183,6 +184,7 @@ impl<'a> Iterator for Ancestors<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let result = if self.iter != 0 {
+            // this monstrosity
             let index = self
                 .path
                 .0
@@ -225,7 +227,7 @@ fn root_merge(_key: &[u8], old_value: Option<&[u8]>, merged_bytes: &[u8]) -> Opt
 }
 
 pub struct Files {
-    // _db: sled::Db,
+    db: sled::Db,
     /// A tree that maps an [Object] to it's data
     objects: sled::Tree,
     /// A tree that maps a string "root" name, to an [Object] containing a filesystem [Node]
@@ -309,23 +311,34 @@ impl Files {
         let objects = db.open_tree("objects")?;
         let roots = db.open_tree("roots")?;
 
-        let files = Files { objects, roots };
+        let files = Files { objects, roots, db };
 
         files.roots.set_merge_operator(root_merge);
 
+        files.initialise()?;
+
+        Ok(files)
+    }
+
+    pub fn is_configured(&self) -> bool {
+        self.get_admin_key().is_ok() && self.get_server_key().is_ok()
+    }
+
+    fn initialise(&self) -> Result<(), Error> {
         // if root node does not exist, create it
-        if files.roots.get("fs")?.is_none() {
+        if self.roots.get("fs")?.is_none() {
             let dir = Node::new_dir();
-            let object = files.serialize(&dir)?;
-            files.roots.merge("fs", object.hash())?;
+            let object = self.serialize(&dir)?;
+            self.roots.merge("fs", object.hash())?;
         }
 
-        if files.roots.get("keyring")?.is_none() {
+        // initialise keyring
+        if self.roots.get("keyring")?.is_none() {
             let dir = Node::new_dir();
-            let object = files.serialize(&dir)?;
-            files.roots.merge("keyring", object.hash())?;
+            let object = self.serialize(&dir)?;
+            self.roots.merge("keyring", object.hash())?;
 
-            files.with_root_mut("keyring", |node| {
+            self.with_root_mut("keyring", |node| {
                 node.make_dir(Path::new("/self")?)?;
                 node.make_dir(Path::new("/trusted")?)?;
 
@@ -333,7 +346,7 @@ impl Files {
             })?;
         }
 
-        Ok(files)
+        Ok(())
     }
 
     fn get_root_history(&self, root: &str) -> Result<RootHistory, Error> {

@@ -64,15 +64,7 @@ async fn main() -> anyhow::Result<()> {
     // parse command line arguments
     let args = Cmdline::parse();
 
-    let config_path = if let Some(config) = args.config {
-        config
-    } else {
-        log::error!("no config file provided");
-        return Ok(());
-    };
-
-    let config_str = tokio::fs::read_to_string(&config_path).await?;
-    let config: config::Config = toml::from_str(&config_str)?;
+    let config = config::load_config(args.config).await?;
 
     match args.command {
         Command::Daemon => {

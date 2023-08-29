@@ -28,6 +28,15 @@ pub enum Method {
         #[arg(short, long)]
         from: Option<PathBuf>,
     },
+
+    Configure {
+        #[arg(short, long)]
+        admin_path: PathBuf,
+        #[arg(short, long)]
+        server_path: PathBuf,
+        #[arg(short, long)]
+        client_path: PathBuf,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -86,10 +95,12 @@ pub async fn invoke(
             error: e.into(),
         })?;
 
-    client
-        .invoke(methods::auth::Identify, key)
-        .await
-        .map_err(|_| CliError::AuthenticationFailed)?;
+    if !matches!(method, Method::Configure { .. }) {
+        client
+            .invoke(methods::auth::Identify, key)
+            .await
+            .map_err(|_| CliError::AuthenticationFailed)?;
+    }
 
     match method {
         Method::Get { from, to } => {
@@ -137,6 +148,27 @@ pub async fn invoke(
             // insert data to server
             client
                 .invoke(methods::fs::Insert, (to, data))
+                .await
+                .map_err(CliError::command_failed)?;
+        }
+
+        Method::Configure {
+            admin_path,
+            server_path,
+            client_path,
+        } => {
+            let admin_data = tokio::fs::read(&admin_path).await.unwrap();
+            let server_data = tokio::fs::read(&server_path).await.unwrap();
+            let client_data = tokio::fs::read(&client_path).await.unwrap();
+
+            let keys: [crypto::Key; 3] = [
+                bincode::deserialize(&admin_data).unwrap(),
+                bincode::deserialize(&server_data).unwrap(),
+                bincode::deserialize(&client_data).unwrap(),
+            ];
+
+            client
+                .invoke(methods::admin::Configure, keys)
                 .await
                 .map_err(CliError::command_failed)?;
         }
