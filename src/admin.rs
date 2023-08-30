@@ -12,18 +12,6 @@ use crate::files::{crypto, Files, Path, Revision};
 
 #[derive(Parser)]
 pub enum Command {
-    Get {
-        path: String,
-    },
-
-    Insert {
-        path: String,
-    },
-
-    Ls {
-        path: String,
-    },
-
     GenPair {
         out: PathBuf,
     },
@@ -42,18 +30,6 @@ pub enum Command {
         key: PathBuf,
     },
 
-    SetAdmin {
-        key: PathBuf,
-    },
-
-    SetServer {
-        key: PathBuf,
-    },
-
-    Trust {
-        key: PathBuf,
-    },
-
     PubKey {
         #[arg(short, long)]
         key: PathBuf,
@@ -64,8 +40,6 @@ pub enum Command {
     DbgKey {
         key: PathBuf,
     },
-
-    Clear,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -78,13 +52,8 @@ struct KeyGen {
     identity: Identity,
 }
 
-pub fn admin_cli(files: &Files, command: Command) -> anyhow::Result<()> {
+pub fn admin_cli(command: Command) -> anyhow::Result<()> {
     match command {
-        Command::Clear => {
-            files.clear()?;
-            eprintln!("database cleared");
-        }
-
         Command::GenPair { out } => {
             let editor = std::env::var("EDITOR")?;
             let tmp = tempfile::NamedTempFile::new()?;
@@ -143,20 +112,6 @@ pub fn admin_cli(files: &Files, command: Command) -> anyhow::Result<()> {
             }
         }
 
-        Command::SetAdmin { key } => {
-            let key_data = std::fs::read(key)?;
-            let key: crypto::Key = bincode::deserialize(&key_data)?;
-
-            files.set_admin_key(key)?;
-        }
-
-        Command::SetServer { key } => {
-            let key_data = std::fs::read(key)?;
-            let key: crypto::Key = bincode::deserialize(&key_data)?;
-
-            files.set_server_key(key)?;
-        }
-
         Command::DbgKey { key } => {
             let key_data = std::fs::read(key)?;
 
@@ -173,61 +128,6 @@ pub fn admin_cli(files: &Files, command: Command) -> anyhow::Result<()> {
             let pub_key = bincode::serialize(&pub_key)?;
 
             std::fs::write(out, pub_key)?;
-        }
-
-        Command::Trust { key } => {
-            let key_data = std::fs::read(key)?;
-            let key: crypto::Key = bincode::deserialize(&key_data)?;
-
-            let pub_key = key.pub_key();
-
-            files.trust_client(pub_key)?;
-        }
-
-        Command::Get { path } => {
-            let path = Path::new(&path)?;
-
-            let data = files.get(path, Revision::FromLatest(0))?;
-
-            if let Some(data) = data {
-                io::stdout().write_all(&data[..])?;
-            } else {
-                eprintln!("error: file '{path}' not found");
-            }
-        }
-
-        Command::Insert { path } => {
-            let path = Path::new(&path)?;
-
-            let mut data = vec![];
-            io::stdin().read_to_end(&mut data)?;
-
-            files.insert(path, &data)?;
-
-            eprintln!("wrote to file {path}");
-        }
-
-        Command::Ls { path } => {
-            let path = Path::new(&path)?;
-
-            let node = files.get_node(path, Revision::FromLatest(0))?;
-
-            match node {
-                Some(mut node) => {
-                    if node.dir_mut().is_some() {
-                        println!("Entries under {path}:");
-
-                        for (path, object, timestamp) in node.file_list()? {
-                            let timestamp = chrono::Local.timestamp_nanos(timestamp as i64);
-
-                            println!("  {path}: {} @ {}", object.hex(), timestamp.format("%v-%X"));
-                        }
-                    } else {
-                        eprintln!("Error: '{path}' is not a directory");
-                    }
-                }
-                None => eprintln!("Error: '{path}' not found"),
-            }
         }
     }
 

@@ -10,7 +10,6 @@ mod server;
 mod sync;
 mod util;
 
-use std::io;
 use std::{net::SocketAddr, path::PathBuf};
 
 use clap::Parser;
@@ -47,6 +46,11 @@ enum Command {
         #[command(subcommand)]
         method: cli::Method,
     },
+
+    Admin {
+        #[command(subcommand)]
+        command: admin::Command,
+    },
 }
 
 #[derive(Parser)]
@@ -65,6 +69,8 @@ async fn main() -> anyhow::Result<()> {
     let args = Cmdline::parse();
 
     let config = config::load_config(args.config).await?;
+
+    println!("{config:?}");
 
     match args.command {
         Command::Daemon => {
@@ -116,6 +122,10 @@ async fn main() -> anyhow::Result<()> {
             };
 
             cli::invoke(key, remote, method).await?;
+        }
+
+        Command::Admin { command } => {
+            admin::admin_cli(command)?;
         }
     }
 

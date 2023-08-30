@@ -1,7 +1,11 @@
 [sync]
 remote = "127.0.0.1:8080"
 resync_time = 4
-key = "example/client.key.pub"
+key = "example/keys/client.key.pub"
 
 [sync.point]
 dir = "/tmp/sync-point"
+
+[client]
+remote = "127.0.0.1:8080"
+key = "example/keys/client.key.pub"

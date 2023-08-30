@@ -6,7 +6,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::{files::Files, server::Context};
 
-/// Reads exactly `N` bytes from a given `reader`, and returns it as a static array
+/// Reads exactly `N` bytes from a given `reader`, and returns it as an array
 pub async fn read_array<const N: usize, R: AsyncReadExt + Unpin>(
     reader: &mut R,
 ) -> io::Result<[u8; N]> {
