@@ -3,3 +3,6 @@
 # Added by cargo
 
 /target
+
+# Local data directory (development TLS identity)
+/data
