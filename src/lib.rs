@@ -5,7 +5,12 @@
 
 pub mod auth;
 pub mod client;
+pub mod config;
+pub mod control;
+pub mod daemon;
 pub mod identity;
+pub mod method;
+pub mod methods;
 pub mod proto;
 pub mod server;
 pub mod tls;

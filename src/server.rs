@@ -30,9 +30,10 @@ use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use crate::{
     auth::{self, Handshake, Role},
     identity::{self, Identity},
+    method::{Context as MethodContext, Registry},
     proto::{
         ALPN, ErrorCode, Features, HelloAck, Id, MAX_AUTH, MAX_FRAME, MAX_HELLO, Message,
-        PROTOCOL_VERSION, RequestBody, Response, ResponseBody, SigAlg, WireError,
+        PROTOCOL_VERSION, Response, ResponseBody, SigAlg, WireError,
     },
     tls,
 };
@@ -48,13 +49,21 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Args, Debug, Clone)]
 pub struct ServerArgs {
+    /// Server TOML config. CLI flags override values in this file.
+    #[arg(long, env = "KSYNC_SERVER_CONFIG")]
+    config: Option<PathBuf>,
+
     /// Address to listen on. Port 0 picks an ephemeral port and prints it.
-    #[arg(long, env = "KSYNC_ADDR", default_value = "127.0.0.1:8443")]
-    addr: SocketAddr,
+    #[arg(long, env = "KSYNC_ADDR")]
+    addr: Option<SocketAddr>,
 
     /// Data directory (app identity lives here; the store will too).
-    #[arg(long, env = "KSYNC_DATA", default_value = "data")]
-    dir: PathBuf,
+    #[arg(long, env = "KSYNC_DATA")]
+    dir: Option<PathBuf>,
+
+    /// Ed25519 identity seed. Defaults to <data dir>/identity.key.
+    #[arg(long, env = "KSYNC_SERVER_IDENTITY_KEY")]
+    identity_key: Option<PathBuf>,
 
     /// PEM certificate chain. Requires --tls-key.
     #[arg(long, env = "KSYNC_TLS_CERT")]
@@ -72,24 +81,26 @@ pub struct ServerArgs {
 
     /// File of allowed client identity ids, one hex id per line.
     #[arg(long, env = "KSYNC_AUTHORIZED_CLIENTS")]
-    authorized_clients: PathBuf,
+    authorized_clients: Option<PathBuf>,
 
     /// Maximum number of simultaneously served connections.
-    #[arg(long, default_value_t = 128)]
-    max_conn: usize,
+    #[arg(long)]
+    max_conn: Option<usize>,
 }
 
-/// Process-wide authentication state.
+/// Process-wide state shared by every connection.
 pub struct Server {
     identity: Identity,
     allowed_clients: HashSet<Id>,
+    registry: Arc<Registry>,
 }
 
 impl Server {
-    pub fn new(identity: Identity, allowed_clients: HashSet<Id>) -> Self {
+    pub fn new(identity: Identity, allowed_clients: HashSet<Id>, registry: Arc<Registry>) -> Self {
         Self {
             identity,
             allowed_clients,
+            registry,
         }
     }
 
@@ -99,14 +110,28 @@ impl Server {
 }
 
 pub async fn run(args: ServerArgs) -> Result<()> {
-    let tls_config = build_tls_config(&args)?;
+    let settings = crate::config::ServerSettings::resolve(
+        args.config.as_deref(),
+        crate::config::ServerOverrides {
+            addr: args.addr,
+            data_dir: args.dir,
+            identity_key: args.identity_key,
+            tls_cert: args.tls_cert,
+            tls_key: args.tls_key,
+            dev: args.dev,
+            authorized_clients: args.authorized_clients,
+            max_conn: args.max_conn,
+        },
+    )?;
 
-    let identity_path = identity::default_path(&args.dir);
-    let identity = Identity::load_or_create(&identity_path)?;
+    let tls_config = build_tls_config(&settings)?;
+
+    let identity_path = &settings.identity_key;
+    let identity = Identity::load_or_create(identity_path)?;
     println!("  server id       {:?}", identity.id());
     println!("  identity key    {}", identity_path.display());
 
-    let clients_path = &args.authorized_clients;
+    let clients_path = &settings.authorized_clients;
     let allowed_clients = identity::load_allowed_clients(clients_path)?;
     println!(
         "  allowed clients {} ({})",
@@ -114,50 +139,45 @@ pub async fn run(args: ServerArgs) -> Result<()> {
         clients_path.display()
     );
 
-    let server = Arc::new(Server::new(identity, allowed_clients));
+    let server = Arc::new(Server::new(
+        identity,
+        allowed_clients,
+        Arc::new(crate::methods::core_registry()?),
+    ));
 
-    let listener = TcpListener::bind(args.addr)
+    let listener = TcpListener::bind(settings.addr)
         .await
-        .with_context(|| format!("cannot bind {}", args.addr))?;
+        .with_context(|| format!("cannot bind {}", settings.addr))?;
     let local = listener.local_addr()?;
 
     println!("listening on {local}");
-    println!("  max connections {}", args.max_conn);
+    println!("  max connections {}", settings.max_conn);
 
     serve(
         listener,
         TlsAcceptor::from(tls_config),
         server,
-        args.max_conn,
+        settings.max_conn,
     )
     .await
 }
 
-fn build_tls_config(args: &ServerArgs) -> Result<Arc<ServerConfig>> {
-    match (&args.tls_cert, &args.tls_key, args.dev) {
-        (Some(cert), Some(key), false) => {
-            println!("  identity        {}", cert.display());
-            tls::server_config(tls::load_identity(cert, key)?)
-        }
-
-        (None, None, true) => {
-            let (identity, paths) = tls::dev_identity(&args.dir)?;
-            println!("  identity        {} (development)", paths.cert.display());
-            println!("  trust this CA   {}", paths.ca_cert.display());
-            println!("  CA fingerprint  sha256:{}", fingerprint(&paths.ca_cert)?);
-            tls::server_config(identity)
-        }
-
-        (Some(_), Some(_), true) => {
-            bail!("--dev cannot be combined with --tls-cert/--tls-key")
-        }
-        (None, None, false) => bail!(
-            "no certificate configured: pass --tls-cert and --tls-key, \
-             or --dev for a local development CA"
-        ),
-        (Some(_), None, _) => bail!("--tls-cert requires --tls-key"),
-        (None, Some(_), _) => bail!("--tls-key requires --tls-cert"),
+fn build_tls_config(settings: &crate::config::ServerSettings) -> Result<Arc<ServerConfig>> {
+    if settings.dev {
+        let (identity, paths) = tls::dev_identity(&settings.data_dir)?;
+        println!("  identity        {} (development)", paths.cert.display());
+        println!("  trust this CA   {}", paths.ca_cert.display());
+        println!("  CA fingerprint  sha256:{}", fingerprint(&paths.ca_cert)?);
+        return tls::server_config(identity);
     }
+
+    let cert = settings
+        .tls_cert
+        .as_ref()
+        .context("no tls_cert configured")?;
+    let key = settings.tls_key.as_ref().context("no tls_key configured")?;
+    println!("  identity        {}", cert.display());
+    tls::server_config(tls::load_identity(cert, key)?)
 }
 
 fn fingerprint(path: &std::path::Path) -> Result<String> {
@@ -241,7 +261,7 @@ async fn handle(
         .context("authentication timed out")??;
     println!("{peer}: authenticated as {client:?}");
 
-    let result = request_loop(&mut tls, peer).await;
+    let result = request_loop(&mut tls, peer, client, &server).await;
 
     // Best-effort close_notify so the peer sees a clean shutdown rather than
     // a truncated stream.
@@ -350,7 +370,12 @@ async fn authenticate(tls: &mut TlsStream<TcpStream>, server: &Server) -> Result
     Ok(handshake.initiator_id)
 }
 
-async fn request_loop(tls: &mut TlsStream<TcpStream>, peer: SocketAddr) -> Result<u64> {
+async fn request_loop(
+    tls: &mut TlsStream<TcpStream>,
+    peer: SocketAddr,
+    client: Id,
+    server: &Server,
+) -> Result<u64> {
     let mut requests = 0;
 
     loop {
@@ -367,8 +392,19 @@ async fn request_loop(tls: &mut TlsStream<TcpStream>, peer: SocketAddr) -> Resul
         match message {
             Message::Request(request) => {
                 requests += 1;
-                let body = match request.body {
-                    RequestBody::Ping => ResponseBody::Pong,
+
+                let mut ctx = MethodContext {
+                    peer: client,
+                    request_id: request.id,
+                };
+
+                let body = match server
+                    .registry
+                    .call(&mut ctx, &request.method, &request.payload)
+                    .await
+                {
+                    Ok(payload) => ResponseBody::Ok(payload),
+                    Err(err) => ResponseBody::Error(err.into_wire()),
                 };
 
                 crate::proto::write_typed(

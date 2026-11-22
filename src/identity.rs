@@ -111,6 +111,16 @@ pub fn identity_id(sig_alg: SigAlg, public: &PubKey) -> Id {
     Id(hasher.finalize().into())
 }
 
+/// Parse a 64-character hex identity id.
+pub fn parse_id(value: &str) -> Result<Id> {
+    let value = value.trim();
+    let bytes = hex::decode(value).context("identity id is not valid hex")?;
+    let id: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("identity id must be 32 bytes (64 hex characters)"))?;
+    Ok(Id(id))
+}
+
 pub fn verify_identity(sig_alg: SigAlg, public: &PubKey, id: Id) -> Result<()> {
     let expected = identity_id(sig_alg, public);
     if expected != id {

@@ -3,18 +3,53 @@
 //! This is the mirror of the server's state machine. It is used by the
 //! integration tests today and will back the eventual `ksync client` command.
 
+use std::time::Duration;
+
 use anyhow::{Context, Result, bail};
-use tokio::net::TcpStream;
-use tokio_rustls::client::TlsStream;
+use rustls::pki_types::ServerName;
+use tokio::{net::TcpStream, time::timeout};
+use tokio_rustls::{TlsConnector, client::TlsStream};
 
 use crate::{
     auth::{self, Handshake, Role},
+    config::ServerProfile,
     identity::{self, Identity},
+    method::Method,
     proto::{
-        ALPN, Auth, Features, Hello, Id, MAX_AUTH, MAX_FRAME, MAX_HELLO, Message, PROTOCOL_VERSION,
-        Request, RequestBody, RequestId, ResponseBody, SigAlg,
+        ALPN, Auth, Features, Hello, Id, MAX_AUTH, MAX_FRAME, MAX_HELLO, Message, MethodName,
+        PROTOCOL_VERSION, Request, RequestId, ResponseBody, SigAlg,
     },
+    tls,
 };
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Connect, verify the server, and complete application authentication.
+pub async fn connect(profile: &ServerProfile, identity: &Identity) -> Result<TlsStream<TcpStream>> {
+    let tcp = timeout(CONNECT_TIMEOUT, TcpStream::connect(profile.addr))
+        .await
+        .context("TCP connect timed out")??;
+    tcp.set_nodelay(true)?;
+
+    let config = tls::client_config(profile.ca.as_deref())?;
+    let server_name =
+        ServerName::try_from(profile.server_name.clone()).context("invalid TLS server name")?;
+
+    let tls = timeout(
+        CONNECT_TIMEOUT,
+        TlsConnector::from(config).connect(server_name, tcp),
+    )
+    .await
+    .context("TLS handshake timed out")??;
+
+    timeout(
+        AUTH_TIMEOUT,
+        handshake(tls, identity, profile.server_id, Features::NONE),
+    )
+    .await
+    .context("application authentication timed out")?
+}
 
 /// Complete the version and authentication handshake.
 ///
@@ -126,20 +161,53 @@ fn check_ack(
     Ok(())
 }
 
-/// Send one request and return its response body.
-pub async fn request(
+/// Invoke a method under the `core` namespace.
+pub async fn call_core<M: Method>(
     tls: &mut TlsStream<TcpStream>,
     id: RequestId,
-    body: RequestBody,
-) -> Result<ResponseBody> {
-    crate::proto::write_typed(tls, &Message::Request(Request { id, body })).await?;
+    input: M::Input,
+) -> Result<M::Output> {
+    call::<M>(tls, id, MethodName::core(M::NAME)?, input).await
+}
+
+/// Send one request and decode its typed response.
+pub async fn call<M: Method>(
+    tls: &mut TlsStream<TcpStream>,
+    id: RequestId,
+    method: MethodName,
+    input: M::Input,
+) -> Result<M::Output> {
+    let payload = postcard::to_stdvec(&input)?;
+
+    crate::proto::write_typed(
+        tls,
+        &Message::Request(Request {
+            id,
+            method,
+            payload,
+        }),
+    )
+    .await?;
 
     match crate::proto::read_typed(tls, MAX_FRAME).await? {
-        Message::Response(response) if response.id == id => Ok(response.body),
+        Message::Response(response) if response.id == id => match response.body {
+            ResponseBody::Ok(bytes) => {
+                let (output, trailing) = postcard::take_from_bytes(&bytes)?;
+                if !trailing.is_empty() {
+                    bail!("trailing bytes in method response");
+                }
+                Ok(output)
+            }
+            ResponseBody::Error(err) => Err(method_error(err)),
+        },
         Message::Response(response) => {
             bail!("response id {} does not match {}", response.id.0, id.0)
         }
         Message::Error(err) => bail!("server closed with {:?}: {}", err.code, err.message()),
         other => bail!("expected Response, got {other:?}"),
     }
+}
+
+fn method_error(err: crate::proto::WireError) -> anyhow::Error {
+    anyhow::anyhow!("method failed ({:?}): {}", err.code, err.message())
 }

@@ -6,3 +6,6 @@
 
 # Local data directory (development TLS identity)
 /data
+
+# Example config runtime state (dev TLS certs, control socket, logs)
+/examples/config/state

@@ -1,0 +1,15 @@
+# Development client configuration.
+#
+# The identity seed and server id are committed for convenience. They are
+# public and only suitable for local development.
+
+[client]
+identity = "dev-client-identity.key"
+control_socket = "state/control.sock"
+
+[[servers]]
+name = "dev"
+addr = "127.0.0.1:18443"
+server_name = "localhost"
+server_id = "802e590f5fbbc1f329da4e709dbad63769f04fd6166cf6cd03ce0a1e41da820b"
+ca = "state/server/tls/dev-ca.cert.pem"

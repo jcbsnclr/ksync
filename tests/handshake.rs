@@ -16,7 +16,8 @@ use anyhow::Result;
 use ksync::{
     client,
     identity::Identity,
-    proto::{Features, Id, RequestBody, RequestId, ResponseBody},
+    methods::Ping,
+    proto::{Features, Id, RequestId},
     server::{self, Server},
     tls,
 };
@@ -78,7 +79,11 @@ async fn start_server(scratch: &Scratch, allowed_client: Id) -> TestServer {
 
     let mut allowed = HashSet::new();
     allowed.insert(allowed_client);
-    let app = Arc::new(Server::new(identity, allowed));
+    let app = Arc::new(Server::new(
+        identity,
+        allowed,
+        Arc::new(ksync::methods::core_registry().unwrap()),
+    ));
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -137,11 +142,9 @@ async fn authenticates_and_answers_ping() {
         );
     }
 
-    let response = client::request(&mut tls, RequestId(1), RequestBody::Ping)
+    client::call_core::<Ping>(&mut tls, RequestId(1), ())
         .await
         .unwrap();
-
-    assert!(matches!(response, ResponseBody::Pong));
 
     server.stop();
 }

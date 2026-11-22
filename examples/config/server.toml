@@ -1,0 +1,12 @@
+# Development server configuration.
+#
+# This uses a committed, public Ed25519 identity seed and a generated local
+# CA. It is for running ksync from this repository only. Never deploy it.
+
+[server]
+addr = "127.0.0.1:18443"
+data_dir = "state/server"
+identity_key = "dev-server-identity.key"
+dev = true
+authorized_clients = "authorized_clients.txt"
+max_conn = 16

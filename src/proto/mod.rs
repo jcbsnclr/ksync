@@ -64,6 +64,174 @@ impl fmt::Debug for PubKey {
 #[serde(transparent)]
 pub struct RequestId(pub u64);
 
+/// A method namespace: `core` for built-ins, a validated plugin name otherwise.
+///
+/// ASCII lowercase only. No normalisation, no aliases.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Namespace(String);
+
+impl Namespace {
+    pub fn core() -> Self {
+        Self("core".into())
+    }
+
+    pub fn parse(value: &str) -> Result<Self, NameError> {
+        validate_namespace(value)?;
+        Ok(Self(value.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn is_reserved(&self) -> bool {
+        matches!(self.0.as_str(), "core" | "sys" | "admin")
+    }
+}
+
+impl fmt::Debug for Namespace {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A fully-qualified method name: `namespace:local`.
+///
+/// Constructed by the host, never by a plugin. Validation is strict and
+/// canonical: invalid spellings are rejected, not rewritten.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MethodName(String);
+
+impl MethodName {
+    pub fn new(namespace: &Namespace, local: &str) -> Result<Self, NameError> {
+        validate_local(local)?;
+
+        let full = format!("{}:{local}", namespace.as_str());
+        if full.len() > MAX_METHOD_NAME {
+            return Err(NameError::TooLong(full.len()));
+        }
+
+        Ok(Self(full))
+    }
+
+    pub fn core(local: &str) -> Result<Self, NameError> {
+        Self::new(&Namespace::core(), local)
+    }
+
+    pub fn parse(value: &str) -> Result<Self, NameError> {
+        if value.len() > MAX_METHOD_NAME {
+            return Err(NameError::TooLong(value.len()));
+        }
+
+        let Some((namespace, local)) = value.split_once(':') else {
+            return Err(NameError::Format);
+        };
+        if local.contains(':') {
+            return Err(NameError::Format);
+        }
+
+        validate_namespace(namespace)?;
+        validate_local(local).map_err(|_| NameError::InvalidLocal(local.to_owned()))?;
+
+        Ok(Self(value.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for MethodName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl fmt::Debug for MethodName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self}")
+    }
+}
+
+impl Serialize for MethodName {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for MethodName {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(de::Error::custom)
+    }
+}
+
+pub const MAX_METHOD_NAME: usize = 64;
+const MAX_NAMESPACE: usize = 32;
+const MAX_LOCAL: usize = 31;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NameError {
+    Format,
+    TooLong(usize),
+    InvalidNamespace(String),
+    InvalidLocal(String),
+}
+
+impl fmt::Display for NameError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Format => f.write_str("method name must be namespace:name"),
+            Self::TooLong(len) => write!(f, "method name is {len} bytes; max is {MAX_METHOD_NAME}"),
+            Self::InvalidNamespace(ns) => write!(f, "invalid namespace {ns:?}"),
+            Self::InvalidLocal(local) => write!(f, "invalid local name {local:?}"),
+        }
+    }
+}
+
+impl std::error::Error for NameError {}
+
+fn validate_namespace(value: &str) -> Result<(), NameError> {
+    validate_component(value, MAX_NAMESPACE, false)
+        .map_err(|_| NameError::InvalidNamespace(value.to_owned()))
+}
+
+fn validate_local(value: &str) -> Result<(), NameError> {
+    validate_component(value, MAX_LOCAL, true)
+        .map_err(|_| NameError::InvalidLocal(value.to_owned()))
+}
+
+/// Validate a local method name without constructing a namespace.
+pub fn validate_local_name(value: &str) -> Result<(), NameError> {
+    validate_local(value)
+}
+
+/// ASCII lowercase, starts with a letter, then letters/digits and optionally
+/// `-`/`_`. Rejects empty strings and both separators at the edges.
+fn validate_component(value: &str, max: usize, allow_underscore: bool) -> Result<(), ()> {
+    if value.is_empty() || value.len() > max || !value.is_ascii() {
+        return Err(());
+    }
+
+    let mut bytes = value.bytes();
+    let first = bytes.next().ok_or(())?;
+    if !first.is_ascii_lowercase() {
+        return Err(());
+    }
+
+    for byte in bytes {
+        let ok = byte.is_ascii_lowercase()
+            || byte.is_ascii_digit()
+            || byte == b'-'
+            || (allow_underscore && byte == b'_');
+        if !ok {
+            return Err(());
+        }
+    }
+
+    Ok(())
+}
+
 /// Independent, optional capabilities. A set, not a choice; negotiated by
 /// intersection. Unknown bits are ignored so new clients can talk to old
 /// servers.
@@ -267,12 +435,9 @@ pub struct AuthOk {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
     pub id: RequestId,
-    pub body: RequestBody,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum RequestBody {
-    Ping, // 0
+    pub method: MethodName,
+    #[serde(with = "serde_bytes")]
+    pub payload: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -283,8 +448,8 @@ pub struct Response {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ResponseBody {
-    Pong,             // 0
-    Error(WireError), // 1
+    Ok(#[serde(with = "serde_bytes")] Vec<u8>), // 0
+    Error(WireError),                           // 1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -427,5 +592,41 @@ mod tests {
             Some(PROTOCOL_VERSION)
         );
         assert_eq!(negotiate(ProtocolVersion(2), ProtocolVersion(3)), None);
+    }
+
+    #[test]
+    fn method_names_are_strictly_validated() {
+        assert!(MethodName::parse("core:ping").is_ok());
+        assert!(MethodName::parse("foobar:sync_manifest").is_ok());
+
+        for invalid in [
+            "",
+            "ping",
+            "core:",
+            ":ping",
+            "core:ping:extra",
+            "Core:ping",
+            "core:Ping",
+            "core:ping.",
+            "core:ping/other",
+            "core:pin g",
+            "core:é",
+        ] {
+            assert!(
+                MethodName::parse(invalid).is_err(),
+                "{invalid:?} should be rejected"
+            );
+        }
+
+        assert!(Namespace::parse("Core").is_err());
+        assert!(Namespace::parse("core").unwrap().is_reserved());
+        assert!(!Namespace::parse("foobar").unwrap().is_reserved());
+    }
+
+    #[test]
+    fn the_host_prefixes_local_names() {
+        let namespace = Namespace::parse("foobar").unwrap();
+        let name = MethodName::new(&namespace, "sync").unwrap();
+        assert_eq!(name.as_str(), "foobar:sync");
     }
 }
