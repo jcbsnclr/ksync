@@ -13,4 +13,5 @@ pub mod method;
 pub mod methods;
 pub mod proto;
 pub mod server;
+pub mod shutdown;
 pub mod tls;

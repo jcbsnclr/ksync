@@ -9,8 +9,10 @@ use anyhow::{Context, Result};
 use tokio::{
     net::{UnixListener, UnixStream},
     sync::{Mutex, mpsc, oneshot},
+    task::JoinHandle,
     time::{Instant, interval_at, sleep, timeout},
 };
+use tracing::{error, info, warn};
 
 use crate::{
     client,
@@ -22,6 +24,7 @@ use crate::{
     identity::Identity,
     methods::Ping,
     proto::RequestId,
+    shutdown::Shutdown,
 };
 
 const KEEPALIVE: Duration = Duration::from_secs(90);
@@ -40,13 +43,23 @@ struct ServerHandle {
 }
 
 pub async fn run(config_path: PathBuf) -> Result<()> {
+    let shutdown = crate::shutdown::install_signal_handler();
+    run_until(config_path, shutdown).await
+}
+
+/// Run the daemon until `shutdown` flips to `true`.
+///
+/// Public so integration tests can drive the real control loop without
+/// signals.
+pub async fn run_until(config_path: PathBuf, shutdown: Shutdown) -> Result<()> {
     let config = ClientConfig::load(&config_path)?;
     let identity = Arc::new(config.identity()?);
+    let mut shutdown = shutdown;
 
-    println!(
-        "daemon: identity {:?} ({})",
-        identity.id(),
-        config.identity.display()
+    info!(
+        identity = ?identity.id(),
+        path = %config.identity.display(),
+        "daemon identity"
     );
 
     if let Some(parent) = config.control_socket.parent() {
@@ -66,6 +79,7 @@ pub async fn run(config_path: PathBuf) -> Result<()> {
     set_mode(&config.control_socket, 0o600)?;
 
     let mut handles = HashMap::new();
+    let mut tasks: Vec<JoinHandle<()>> = Vec::new();
 
     for profile in config.servers.clone() {
         let (tx, rx) = mpsc::channel(8);
@@ -75,32 +89,55 @@ pub async fn run(config_path: PathBuf) -> Result<()> {
             last_error: None,
         }));
 
-        tokio::spawn(server_task(
+        tasks.push(tokio::spawn(server_task(
             profile.clone(),
             Arc::clone(&identity),
             Arc::clone(&status),
             rx,
-        ));
+            shutdown.clone(),
+        )));
 
         handles.insert(profile.name.clone(), ServerHandle { tx, status });
     }
 
     let handles = Arc::new(handles);
-    println!(
-        "daemon: listening on {} ({} server(s))",
-        config.control_socket.display(),
-        handles.len()
+    info!(
+        socket = %config.control_socket.display(),
+        servers = handles.len(),
+        "daemon listening"
     );
 
     loop {
-        let (stream, _) = listener.accept().await?;
+        let stream = tokio::select! {
+            _ = shutdown.changed() => break,
+            result = listener.accept() => result?.0,
+        };
+
         let handles = Arc::clone(&handles);
         tokio::spawn(async move {
             if let Err(err) = handle_control(stream, handles).await {
-                eprintln!("control: {err:#}");
+                warn!("control connection failed: {err:#}");
             }
         });
     }
+
+    drop(listener);
+    info!("daemon shutting down");
+
+    let _ = timeout(Duration::from_secs(5), async {
+        for task in tasks {
+            let _ = task.await;
+        }
+    })
+    .await;
+
+    if let Err(err) = std::fs::remove_file(&config.control_socket)
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        error!("cannot remove {}: {err}", config.control_socket.display());
+    }
+
+    Ok(())
 }
 
 async fn handle_control(
@@ -216,11 +253,17 @@ async fn server_task(
     identity: Arc<Identity>,
     status: Arc<Mutex<ServerStatus>>,
     mut commands: mpsc::Receiver<ServerCommand>,
+    mut shutdown: Shutdown,
 ) {
     let mut backoff = Duration::from_secs(1);
 
     loop {
-        match client::connect(&profile, &identity).await {
+        let connected = tokio::select! {
+            _ = shutdown.changed() => return,
+            result = client::connect(&profile, &identity) => result,
+        };
+
+        match connected {
             Ok(mut tls) => {
                 backoff = Duration::from_secs(1);
                 {
@@ -228,13 +271,17 @@ async fn server_task(
                     status.connected = true;
                     status.last_error = None;
                 }
-                println!("{}: connected to {}", profile.name, profile.addr);
+                info!(server = %profile.name, addr = %profile.addr, "connected");
 
                 let mut keepalive = interval_at(Instant::now() + KEEPALIVE, KEEPALIVE);
                 keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
                 loop {
                     tokio::select! {
+                        _ = shutdown.changed() => {
+                            info!(server = %profile.name, "shutdown requested");
+                            return;
+                        }
                         command = commands.recv() => {
                             match command {
                                 Some(ServerCommand::Ping { reply }) => {
@@ -254,7 +301,7 @@ async fn server_task(
                         }
                         _ = keepalive.tick() => {
                             if let Err(err) = client::call_core::<Ping>(&mut tls, RequestId(1), ()).await {
-                                eprintln!("{}: keepalive failed: {err:#}", profile.name);
+                                warn!(server = %profile.name, "keepalive failed: {err:#}");
                                 break;
                             }
                         }
@@ -266,7 +313,7 @@ async fn server_task(
                     status.connected = false;
                     status.last_error = Some("connection lost".into());
                 }
-                eprintln!("{}: disconnected", profile.name);
+                warn!(server = %profile.name, "disconnected");
             }
 
             Err(err) => {
@@ -276,7 +323,7 @@ async fn server_task(
                     status.connected = false;
                     status.last_error = Some(detail.clone());
                 }
-                eprintln!("{}: {detail}", profile.name);
+                warn!(server = %profile.name, "connection failed: {detail}");
             }
         }
 
@@ -287,6 +334,7 @@ async fn server_task(
 
         loop {
             tokio::select! {
+                _ = shutdown.changed() => return,
                 _ = &mut deadline => break,
                 command = commands.recv() => {
                     match command {

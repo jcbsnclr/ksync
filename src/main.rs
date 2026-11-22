@@ -59,6 +59,7 @@ struct SyncArgs {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    init_tracing();
     let cli = Cli::parse();
 
     match cli.command {
@@ -70,6 +71,18 @@ async fn main() -> Result<()> {
     }
 }
 
+fn init_tracing() {
+    use std::io::IsTerminal;
+    use tracing_subscriber::{EnvFilter, fmt};
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let _ = fmt()
+        .with_env_filter(filter)
+        .with_ansi(std::io::stderr().is_terminal())
+        .with_writer(std::io::stderr)
+        .try_init();
+}
+
 fn config_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
     match explicit {
         Some(path) => Ok(path),
@@ -77,7 +90,7 @@ fn config_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
             let path = ClientConfig::discover()?;
             if !path.exists() {
                 bail!(
-                    "no config at {} (use --config or KSYNC_CONFIG)",
+                    "no config at {} (use --client-config or KSYNC_CLIENT_CONFIG)",
                     path.display()
                 );
             }

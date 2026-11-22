@@ -219,39 +219,42 @@ impl ServerSettings {
             .addr
             .or(raw.addr)
             .unwrap_or_else(|| "127.0.0.1:8443".parse().expect("valid default address"));
-        let data_dir = resolve(
-            &base,
-            overrides
-                .data_dir
-                .or(raw.data_dir)
-                .unwrap_or_else(|| "data".into()),
-        );
-        let identity_key = resolve(
-            &base,
-            overrides
-                .identity_key
-                .or(raw.identity_key)
-                .unwrap_or_else(|| data_dir.join(identity::IDENTITY_FILE)),
-        );
-        let tls_cert = overrides
-            .tls_cert
-            .or(raw.tls_cert)
-            .map(|path| resolve(&base, path));
-        let tls_key = overrides
-            .tls_key
-            .or(raw.tls_key)
-            .map(|path| resolve(&base, path));
+
+        // CLI paths are relative to the invoking directory; TOML paths are
+        // relative to the config file.
+        let cli_base = std::env::current_dir().context("cannot determine current directory")?;
+        let data_dir = match overrides.data_dir {
+            Some(path) => resolve(&cli_base, path),
+            None => resolve(&base, raw.data_dir.unwrap_or_else(|| PathBuf::from("data"))),
+        };
+        let identity_key = match overrides.identity_key {
+            Some(path) => resolve(&cli_base, path),
+            None => match raw.identity_key {
+                Some(path) => resolve(&base, path),
+                None => data_dir.join(identity::IDENTITY_FILE),
+            },
+        };
+        let tls_cert = match overrides.tls_cert {
+            Some(path) => Some(resolve(&cli_base, path)),
+            None => raw.tls_cert.map(|path| resolve(&base, path)),
+        };
+        let tls_key = match overrides.tls_key {
+            Some(path) => Some(resolve(&cli_base, path)),
+            None => raw.tls_key.map(|path| resolve(&base, path)),
+        };
         let dev = overrides.dev || raw.dev.unwrap_or(false);
         let max_conn = overrides.max_conn.or(raw.max_conn).unwrap_or(128);
 
-        let authorized_clients = overrides
-            .authorized_clients
-            .or(raw.authorized_clients)
-            .context(
-                "no client allowlist: configure authorized_clients or pass \
-                 --authorized-clients <FILE>",
-            )?;
-        let authorized_clients = resolve(&base, authorized_clients);
+        let authorized_clients = match overrides.authorized_clients {
+            Some(path) => resolve(&cli_base, path),
+            None => {
+                let path = raw.authorized_clients.context(
+                    "no client allowlist: configure authorized_clients or pass \
+                     --authorized-clients <FILE>",
+                )?;
+                resolve(&base, path)
+            }
+        };
 
         if max_conn == 0 {
             bail!("max_conn must be at least 1");

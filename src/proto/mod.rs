@@ -591,7 +591,18 @@ mod tests {
             negotiate(ProtocolVersion(1), ProtocolVersion(1)),
             Some(PROTOCOL_VERSION)
         );
+        assert_eq!(
+            negotiate(ProtocolVersion(1), ProtocolVersion(2)),
+            Some(PROTOCOL_VERSION)
+        );
+        assert_eq!(
+            negotiate(ProtocolVersion(0), ProtocolVersion(1)),
+            Some(PROTOCOL_VERSION)
+        );
+        assert_eq!(negotiate(ProtocolVersion(0), ProtocolVersion(0)), None);
         assert_eq!(negotiate(ProtocolVersion(2), ProtocolVersion(3)), None);
+        // Inverted ranges cannot match.
+        assert_eq!(negotiate(ProtocolVersion(3), ProtocolVersion(1)), None);
     }
 
     #[test]

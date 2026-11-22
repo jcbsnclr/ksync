@@ -9,3 +9,6 @@
 
 # Example config runtime state (dev TLS certs, control socket, logs)
 /examples/config/state
+
+# Generated documentation
+/docs/build

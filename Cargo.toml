@@ -21,4 +21,6 @@ sha2 = "0.10"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros", "signal"] }
 tokio-rustls = "0.26.6"
 toml = "1.2.2"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 webpki-roots = "1.0.12"

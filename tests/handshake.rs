@@ -61,10 +61,12 @@ struct TestServer {
     paths: tls::DevPaths,
     server_id: Id,
     handle: JoinHandle<Result<()>>,
+    shutdown: tokio::sync::watch::Sender<bool>,
 }
 
 impl TestServer {
     fn stop(self) {
+        let _ = self.shutdown.send(true);
         self.handle.abort();
     }
 }
@@ -87,12 +89,14 @@ async fn start_server(scratch: &Scratch, allowed_client: Id) -> TestServer {
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let (shutdown, shutdown_rx) = ksync::shutdown::channel();
 
     let handle = tokio::spawn(server::serve(
         listener,
         TlsAcceptor::from(tls_config),
         app,
         8,
+        shutdown_rx,
     ));
 
     TestServer {
@@ -100,6 +104,7 @@ async fn start_server(scratch: &Scratch, allowed_client: Id) -> TestServer {
         paths,
         server_id,
         handle,
+        shutdown,
     }
 }
 

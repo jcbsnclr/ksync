@@ -23,9 +23,11 @@ use tokio::{
     io::AsyncWriteExt,
     net::{TcpListener, TcpStream},
     sync::Semaphore,
+    task::JoinSet,
     time::timeout,
 };
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
+use tracing::{info, warn};
 
 use crate::{
     auth::{self, Handshake, Role},
@@ -128,15 +130,18 @@ pub async fn run(args: ServerArgs) -> Result<()> {
 
     let identity_path = &settings.identity_key;
     let identity = Identity::load_or_create(identity_path)?;
-    println!("  server id       {:?}", identity.id());
-    println!("  identity key    {}", identity_path.display());
+    info!(
+        server_id = ?identity.id(),
+        path = %identity_path.display(),
+        "server identity"
+    );
 
     let clients_path = &settings.authorized_clients;
     let allowed_clients = identity::load_allowed_clients(clients_path)?;
-    println!(
-        "  allowed clients {} ({})",
-        allowed_clients.len(),
-        clients_path.display()
+    info!(
+        allowed = allowed_clients.len(),
+        path = %clients_path.display(),
+        "client allowlist"
     );
 
     let server = Arc::new(Server::new(
@@ -150,14 +155,16 @@ pub async fn run(args: ServerArgs) -> Result<()> {
         .with_context(|| format!("cannot bind {}", settings.addr))?;
     let local = listener.local_addr()?;
 
-    println!("listening on {local}");
-    println!("  max connections {}", settings.max_conn);
+    info!(addr = %local, max_connections = settings.max_conn, "listening");
+
+    let shutdown = crate::shutdown::install_signal_handler();
 
     serve(
         listener,
         TlsAcceptor::from(tls_config),
         server,
         settings.max_conn,
+        shutdown,
     )
     .await
 }
@@ -165,9 +172,9 @@ pub async fn run(args: ServerArgs) -> Result<()> {
 fn build_tls_config(settings: &crate::config::ServerSettings) -> Result<Arc<ServerConfig>> {
     if settings.dev {
         let (identity, paths) = tls::dev_identity(&settings.data_dir)?;
-        println!("  identity        {} (development)", paths.cert.display());
-        println!("  trust this CA   {}", paths.ca_cert.display());
-        println!("  CA fingerprint  sha256:{}", fingerprint(&paths.ca_cert)?);
+        info!(path = %paths.cert.display(), "development TLS identity");
+        info!(path = %paths.ca_cert.display(), "trust this CA");
+        info!(fingerprint = %fingerprint(&paths.ca_cert)?, "CA fingerprint");
         return tls::server_config(identity);
     }
 
@@ -176,7 +183,7 @@ fn build_tls_config(settings: &crate::config::ServerSettings) -> Result<Arc<Serv
         .as_ref()
         .context("no tls_cert configured")?;
     let key = settings.tls_key.as_ref().context("no tls_key configured")?;
-    println!("  identity        {}", cert.display());
+    info!(path = %cert.display(), "TLS identity");
     tls::server_config(tls::load_identity(cert, key)?)
 }
 
@@ -197,40 +204,72 @@ pub async fn serve(
     acceptor: TlsAcceptor,
     server: Arc<Server>,
     max_conn: usize,
+    shutdown: crate::shutdown::Shutdown,
 ) -> Result<()> {
     let permits = Arc::new(Semaphore::new(max_conn.max(1)));
+    let mut shutdown = shutdown;
+    let mut connections = JoinSet::new();
 
     loop {
         // Acquire *before* accepting. When at capacity we stop pulling
         // connections off the queue entirely, so the kernel backlog does the
         // queueing instead of us holding sockets open.
-        let permit = Arc::clone(&permits)
-            .acquire_owned()
-            .await
-            .context("connection limiter closed")?;
+        let permit = tokio::select! {
+            _ = shutdown.changed() => break,
+            permit = Arc::clone(&permits).acquire_owned() => {
+                permit.context("connection limiter closed")?
+            }
+        };
 
-        let (stream, peer) = match listener.accept().await {
-            Ok(pair) => pair,
-            // A single failed accept (transient resource pressure) must not
-            // take the whole server down.
-            Err(err) => {
-                eprintln!("accept failed: {err}");
-                continue;
+        let (stream, peer) = tokio::select! {
+            _ = shutdown.changed() => break,
+            result = listener.accept() => match result {
+                Ok(pair) => pair,
+                // A single failed accept (transient resource pressure) must
+                // not take the whole server down.
+                Err(err) => {
+                    warn!("accept failed: {err}");
+                    continue;
+                }
             }
         };
 
         let acceptor = acceptor.clone();
         let server = Arc::clone(&server);
-        tokio::spawn(async move {
+        let connection_shutdown = shutdown.clone();
+
+        connections.spawn(async move {
             // The permit is released on drop, including if the handler
             // panics.
             let _permit = permit;
 
-            if let Err(err) = handle(stream, peer, acceptor, server).await {
-                eprintln!("{peer}: {err:#}");
+            if let Err(err) = handle(stream, peer, acceptor, server, connection_shutdown).await {
+                warn!("{peer}: {err:#}");
             }
         });
+
+        while connections.try_join_next().is_some() {}
     }
+
+    drop(listener);
+    info!("shutting down listener");
+
+    // Give in-flight connections a bounded chance to close cleanly.
+    if timeout(Duration::from_secs(5), async {
+        while connections.join_next().await.is_some() {}
+    })
+    .await
+    .is_err()
+    {
+        connections.abort_all();
+        let _ = timeout(Duration::from_secs(1), async {
+            while connections.join_next().await.is_some() {}
+        })
+        .await;
+        warn!("connection shutdown timed out; aborted remaining tasks");
+    }
+
+    Ok(())
 }
 
 async fn handle(
@@ -238,37 +277,48 @@ async fn handle(
     peer: SocketAddr,
     acceptor: TlsAcceptor,
     server: Arc<Server>,
+    mut shutdown: crate::shutdown::Shutdown,
 ) -> Result<()> {
     stream.set_nodelay(true)?;
 
     let started = Instant::now();
-    let mut tls = timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream))
-        .await
-        .context("TLS handshake timed out")??;
+    let mut tls = tokio::select! {
+        _ = shutdown.changed() => return Ok(()),
+        result = timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)) => {
+            result.context("TLS handshake timed out")??
+        }
+    };
 
-    println!(
-        "{peer}: {} (handshake {:.1?})",
-        tls::describe(tls.get_ref().1),
-        started.elapsed(),
+    info!(
+        peer = %peer,
+        tls = %tls::describe(tls.get_ref().1),
+        elapsed = ?started.elapsed(),
+        "TLS handshake complete"
     );
 
     if tls.get_ref().1.alpn_protocol() != Some(ALPN) {
         bail!("peer did not negotiate the ksync ALPN protocol");
     }
 
-    let client = timeout(AUTH_TIMEOUT, authenticate(&mut tls, &server))
-        .await
-        .context("authentication timed out")??;
-    println!("{peer}: authenticated as {client:?}");
+    let client = tokio::select! {
+        _ = shutdown.changed() => {
+            let _ = tls.shutdown().await;
+            return Ok(());
+        }
+        result = timeout(AUTH_TIMEOUT, authenticate(&mut tls, &server)) => {
+            result.context("authentication timed out")??
+        }
+    };
+    info!(peer = %peer, client = ?client, "authenticated");
 
-    let result = request_loop(&mut tls, peer, client, &server).await;
+    let result = request_loop(&mut tls, peer, client, &server, shutdown.clone()).await;
 
     // Best-effort close_notify so the peer sees a clean shutdown rather than
     // a truncated stream.
     let _ = tls.shutdown().await;
 
     let requests = result?;
-    println!("{peer}: closed after {requests} request(s)");
+    info!(peer = %peer, requests, "connection closed");
     Ok(())
 }
 
@@ -375,18 +425,27 @@ async fn request_loop(
     peer: SocketAddr,
     client: Id,
     server: &Server,
+    mut shutdown: crate::shutdown::Shutdown,
 ) -> Result<u64> {
     let mut requests = 0;
 
     loop {
-        let message = match timeout(IDLE_TIMEOUT, crate::proto::read_typed(tls, MAX_FRAME)).await {
-            Err(_) => {
-                eprintln!("{peer}: idle timeout");
+        let message = tokio::select! {
+            _ = shutdown.changed() => {
+                info!(%peer, "shutdown requested");
                 break;
             }
-            Ok(Err(err)) if is_clean_eof(&err) => break,
-            Ok(Err(err)) => return Err(err),
-            Ok(Ok(message)) => message,
+            result = timeout(IDLE_TIMEOUT, crate::proto::read_typed(tls, MAX_FRAME)) => {
+                match result {
+                    Err(_) => {
+                        info!(%peer, "idle timeout");
+                        break;
+                    }
+                    Ok(Err(err)) if is_clean_eof(&err) => break,
+                    Ok(Err(err)) => return Err(err),
+                    Ok(Ok(message)) => message,
+                }
+            }
         };
 
         match message {
@@ -398,13 +457,34 @@ async fn request_loop(
                     request_id: request.id,
                 };
 
+                let method = request.method.clone();
+                let started = Instant::now();
+
                 let body = match server
                     .registry
                     .call(&mut ctx, &request.method, &request.payload)
                     .await
                 {
-                    Ok(payload) => ResponseBody::Ok(payload),
-                    Err(err) => ResponseBody::Error(err.into_wire()),
+                    Ok(payload) => {
+                        info!(
+                            %peer,
+                            request = request.id.0,
+                            method = %method,
+                            elapsed = ?started.elapsed(),
+                            "request ok"
+                        );
+                        ResponseBody::Ok(payload)
+                    }
+                    Err(err) => {
+                        warn!(
+                            %peer,
+                            request = request.id.0,
+                            method = %method,
+                            elapsed = ?started.elapsed(),
+                            "request failed"
+                        );
+                        ResponseBody::Error(err.into_wire())
+                    }
                 };
 
                 crate::proto::write_typed(
@@ -418,10 +498,11 @@ async fn request_loop(
             }
 
             Message::Error(err) => {
-                eprintln!(
-                    "{peer}: client sent error {:?}: {}",
-                    err.code,
-                    err.message()
+                warn!(
+                    %peer,
+                    code = ?err.code,
+                    detail = %err.message(),
+                    "client sent error"
                 );
                 break;
             }
