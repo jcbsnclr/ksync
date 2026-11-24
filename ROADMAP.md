@@ -743,6 +743,8 @@ cargo run -- ping
 ## 10. References
 
 ```text
+README.md              project overview and system diagram
+docs/architecture.md   current implementation: modules, state machines, flows
 docs/protocol.typ      protocol and configuration document
 src/proto/mod.rs       messages, names, limits, encode/decode
 src/proto/frame.rs     u32 LE framing
